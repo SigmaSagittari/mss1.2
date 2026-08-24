@@ -170,6 +170,7 @@
     <ClInclude Include="ui\ui_app.h" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="ui\web\analyzer.js" />
     <None Include="ui\web\index.html" />
     <None Include="ui\web\main.js" />
     <None Include="ui\web\style.css" />

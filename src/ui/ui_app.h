@@ -20,9 +20,7 @@
 #include <utility>
 #include <vector>
 
-#include "analysis/bruteforce/endgame_bruteforce.h"
 #include "core/assert.h"
-#include "core/config.h"
 #include "ui/game_control.h"
 #include "ui/http_server.h"
 #include "ui/interactive.h"
@@ -67,6 +65,7 @@ private:
         if (p == "/" || p == "/index.html") return serveFile("index.html");
         if (p == "/style.css") return serveFile("style.css");
         if (p == "/main.js") return serveFile("main.js");
+        if (p == "/analyzer.js") return serveFile("analyzer.js");
         if (p == "/favicon.ico") return {204, "text/plain", ""};
 
         if (p == "/api/state") return jsonState();
@@ -291,13 +290,13 @@ private:
     // ---------- 概率 ----------
     HttpResponse jsonProbability() {
         const auto& gi = game_->info();
-        const auto& analysis = game_->analysis();
-        Grid<long double> grid = analysis.materializeProbability();
+        const auto& an = game_->analysis();
+        const Grid<long double> grid = Interactive::materializeProbability(an);
 
         std::ostringstream os;
         os << std::setprecision(12);
-        os << "{\"candidates\":\"" << formatCount(analysis.candidates())
-           << "\",\"tProb\":" << static_cast<double>(analysis.tCellProbability())
+        os << "{\"candidates\":\"" << formatCount(Interactive::candidates(an))
+           << "\",\"tProb\":" << static_cast<double>(Interactive::tCellProbability(an))
            << ",\"computedMs\":" << computedMs_ << ",\"prob\":[";
         for (int i = 1; i <= gi.rows; ++i) {
             if (i > 1) os << ',';
@@ -335,7 +334,7 @@ private:
             stateLine = "未翻开";
         lines.push_back("状态: " + stateLine);
 
-        long double p = game_->analysis().mineProbability(x, y);
+        long double p = Interactive::mineProbability(game_->analysis(), x, y);
         std::ostringstream ps;
         ps << std::setprecision(10) << "雷概率: " << static_cast<double>(p) << "  ("
            << std::fixed << std::setprecision(2) << static_cast<double>(p * 100) << "%)";
@@ -345,12 +344,7 @@ private:
         using Engine = GameController::Analysis::Engine;
         if (game_->analysis().engine() == Engine::Approx) {
             const auto& an = game_->analysis();
-            Distribution::DistPool dists;
-            Probability::Result exact =
-                Exact::analyze(an.state(), an.basicMarks(), an.structure(), dists);
-            const long double ep =
-                exact.mineProbability(an.state().id(x, y), an.state(), an.basicMarks(),
-                                      an.structure());
+            const long double ep = Interactive::exactMineProbability(an, x, y);
             const long double diff = (p - ep) * 100.0L;
             std::ostringstream eps;
             eps << std::setprecision(10) << "精确对比: " << static_cast<double>(ep)
@@ -363,11 +357,11 @@ private:
 
         std::ostringstream cs;
         cs << std::setprecision(10)
-           << "候选方案数: " << formatCount(game_->analysis().candidates());
+           << "候选方案数: " << formatCount(Interactive::candidates(game_->analysis()));
         lines.push_back(cs.str());
         std::ostringstream tp;
         tp << std::setprecision(6)
-           << "非前沿雷概率: " << static_cast<double>(game_->analysis().tCellProbability());
+           << "非前沿雷概率: " << static_cast<double>(Interactive::tCellProbability(game_->analysis()));
         lines.push_back(tp.str());
         lines.push_back("计算耗时: " + std::to_string(computedMs_) + " ms");
 
@@ -430,74 +424,25 @@ private:
         return os.str();
     }
 
-    // 物化整盘概率网格（1-based）。basic/structure 与 grid 同源。
-    static Grid<long double> materializeGrid(const ObservedBoard& state,
-                                             const Basic::Result& basic,
-                                             const Structure::Result& structure,
-                                             const Probability::Result& prob) {
-        Grid<long double> grid(state.rows, state.cols, 0.0L);
-        for (int i = 1; i <= state.rows; ++i)
-            for (int j = 1; j <= state.cols; ++j)
-                grid[i][j] = prob.mineProbability(state.id(i, j), state, basic, structure);
-        return grid;
-    }
-
     HttpResponse jsonAnalyze() {
-        // 从当前分析视图（可能被编辑过）全量重构，丢弃旧管线视图。
-        ObservedBoard& state = game_->analysis().state();
-        const Basic::Result basic = Basic::Analyzer::analyze(state);
-        Structure::ShapePool shapes;
-        const Structure::Result structure = Structure::Analyzer::analyze(state, basic, shapes);
-        Distribution::DistPool dists;
-
-        // 合法性 1：basic 矛盾（数字约束无解）。
-        if (!basic.valid)
-            return json("{\"valid\":false,\"reason\":\"盘面矛盾（basic 无解）\"}");
-
-        // 合法性 2：每个活连通块的分布非空（无可行摆法 = 结构矛盾）。
-        for (ComponentId cid = 0; cid < static_cast<ComponentId>(structure.components.size());
-             ++cid) {
-            const Structure::Instance& inst =
-                structure.components[static_cast<std::size_t>(cid)];
-            if (!inst.alive) continue;
-            const Distribution* dist = Distribution::Solver::analyze(*inst.shape, dists);
-            if (dist->entries.empty())
-                return json("{\"valid\":false,\"reason\":\"连通块无可行摆法（矛盾）\"}");
-        }
-
-        // 候选数（精确）：含 T 格组合，= all_distribute 会产出的总方案数。
-        const Probability::Result prob = Exact::analyze(state, basic, structure, dists);
-        const long double candidates = prob.candidates;
-        const Grid<long double> grid = materializeGrid(state, basic, structure, prob);
-
-        // 超过暴力枚举阈值：暂不处理，之后用中盘分析补上（概率网格仍给出）。
-        if (candidates > static_cast<long double>(kMaxBruteforceCount))
+        const Interactive::AnalyzeResult r =
+            Interactive::analyze(game_->analysis().state());
+        if (!r.valid)
+            return json("{\"valid\":false,\"reason\":" + jsonString(r.reason) + "}");
+        if (!r.bruteforce)
             return json("{\"valid\":true,\"bruteforce\":false,\"candidates\":\"" +
-                        formatCount(candidates) +
-                        "\",\"reason\":\"候选方案数超过暴力阈值，中盘分析待实现\"" +
-                        gridJson(grid, prob.tCellProbability) + "}");
+                        formatCount(r.candidates) + "\",\"reason\":" + jsonString(r.reason) +
+                        gridJson(r.grid, r.tProb) + "}");
 
-        // 开始暴力：残局求解。
-        const auto t0 = std::chrono::steady_clock::now();
-        const EndgameBruteforce::Result r =
-            EndgameBruteforce::solveEndgame(state, basic, structure, dists, grid);
-        const auto t1 = std::chrono::steady_clock::now();
-        const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-
-        const auto& mv = r.result[0];
-        const double winRate =
-            r.totalPossibilities > 0
-                ? static_cast<double>(mv.wins) / r.totalPossibilities * 100.0
-                : 0.0;
         std::ostringstream os;
         os << std::setprecision(6);
         os << "{\"valid\":true,\"bruteforce\":true"
-           << ",\"candidates\":\"" << formatCount(candidates) << "\""
-           << ",\"total\":" << r.totalPossibilities
-           << ",\"firstMove\":[" << mv.x << "," << mv.y << "]"
-           << ",\"wins\":" << mv.wins << ",\"winRate\":" << winRate
-           << ",\"nodes\":" << r.nodes << ",\"ms\":" << ms
-           << gridJson(grid, prob.tCellProbability) << "}";
+           << ",\"candidates\":\"" << formatCount(r.candidates) << "\""
+           << ",\"total\":" << r.total
+           << ",\"firstMove\":[" << r.firstX << "," << r.firstY << "]"
+           << ",\"wins\":" << r.wins << ",\"winRate\":" << r.winRate
+           << ",\"nodes\":" << r.nodes << ",\"ms\":" << r.ms
+           << gridJson(r.grid, r.tProb) << "}";
         return json(os.str());
     }
 

@@ -95,6 +95,9 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
+    <None Include="ui\web\analyzer.js">
+      <Filter>ui\web</Filter>
+    </None>
     <None Include="ui\web\index.html">
       <Filter>ui\web</Filter>
     </None>

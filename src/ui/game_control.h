@@ -83,29 +83,9 @@ struct GameController {
         const Structure::Result& structure() const { return structure_; }
         const Probability::Result& probability() const { return prob_; }
 
-        // 单格雷概率（getter，引擎无关的统一入口）。
-        long double mineProbability(int x, int y) const {
-            if (engine_ == Engine::Exact)
-                return prob_.mineProbability(state_.id(x, y), state_, basic_, structure_);
-            return RhoRational::eval(x, y, state_, basic_, structure_, rationals_, approx_.rho);
-        }
-
-        long double candidates() const {
-            return engine_ == Engine::Exact ? prob_.candidates : approx_.candidates;
-        }
-
-        long double tCellProbability() const {
-            return engine_ == Engine::Exact ? prob_.tCellProbability : approx_.rho;
-        }
-
-        // 整盘概率网格物化（引擎无关，UI 渲染用）。逐格查询，O(rows*cols)。
-        Grid<long double> materializeProbability() const {
-            Grid<long double> grid(state_.rows, state_.cols, 0.0L);
-            for (int x = 1; x <= state_.rows; ++x)
-                for (int y = 1; y <= state_.cols; ++y)
-                    grid[x][y] = mineProbability(x, y);
-            return grid;
-        }
+        // 引擎内部状态访问（供 Interactive 层查询/物化，只读）。
+        const Approx::Result& approx() const { return approx_; }
+        const RhoRational::Pool& rationals() const { return rationals_; }
 
         ObservedBoard& state() { return state_; }
         const ObservedBoard& state() const { return state_; }
