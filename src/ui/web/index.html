@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>扫雷</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="menurow">
+    <button class="mode active" data-mode="beg">初级</button>
+    <button class="mode" data-mode="int">中级</button>
+    <button class="mode" data-mode="exp">专家</button>
+    <button class="mode" data-mode="cus">自定义</button>
+    <span id="custom-fields" hidden>
+      <label>行 <input id="cus-rows" type="number" min="2" max="100" value="10"></label>
+      <label>列 <input id="cus-cols" type="number" min="2" max="100" value="12"></label>
+      <label>雷 <input id="cus-mines" type="number" min="1" value="15"></label>
+      <button id="cus-start">开始</button>
+    </span>
+    <span class="spacer"></span>
+    <button id="settings-btn">设置 ▾</button>
+    <div id="settings-menu" hidden>
+      <div class="settings-groups">
+        <button class="sub-btn active" id="sub-ui" type="button">界面 ▸</button>
+        <button class="sub-btn" id="sub-adv" type="button">高级 ▸</button>
+      </div>
+      <div class="submenu" id="sub-ui-panel">
+        <label><input type="checkbox" id="opt-prob"> 显示概率</label>
+        <label><input type="checkbox" id="opt-press" checked> 按住预览</label>
+        <label><input type="checkbox" id="opt-edge" checked> 0%/100% 高亮</label>
+        <label>格子大小 <input id="opt-cell" type="number" min="8" max="80" value="40"> px</label>
+        <label>棋盘展示 <input id="opt-view" type="number" min="10" max="100" value="30"> 格</label>
+      </div>
+      <div class="submenu" id="sub-adv-panel" hidden>
+        <label>更新方法
+          <select id="opt-analysis-mode">
+            <option value="incremental" selected>增量近似更新</option>
+            <option value="full">全局重建（精确）</option>
+          </select>
+        </label>
+        <label>随机种子 <input id="opt-seed" type="number" min="0" value="0"></label>
+        <button id="seed-start" type="button">用此种子开局</button>
+      </div>
+    </div>
+  </div>
+  <div class="statusbar">
+    <div class="led" id="mines-left">10</div>
+    <button class="face" id="face" title="重新开始">🙂</button>
+    <div class="led" id="timer">0:00</div>
+  </div>
+  <div class="main">
+    <div class="boardwrap"><canvas id="main-canvas"></canvas></div>
+    <div class="detail-panel">
+      <div class="panel-title">详细信息</div>
+      <pre id="detail-text">悬停在格子上查看</pre>
+    </div>
+  </div>
+<script src="main.js"></script>
+</body>
+</html>

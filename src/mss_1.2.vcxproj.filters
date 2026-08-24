@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="源文件">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx</Extensions>
+    </Filter>
+    <Filter Include="analysis">
+      <UniqueIdentifier>{bf9e0e1f-2a3b-4c5d-8e6f-7a1b2c3d4e5f}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="analysis\probability">
+      <UniqueIdentifier>{a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="core">
+      <UniqueIdentifier>{b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="core\utility">
+      <UniqueIdentifier>{c3d4e5f6-a7b8-4c9d-0e1f-2a3b4c5d6e7f}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ui">
+      <UniqueIdentifier>{d4e5f6a7-b8c9-4d0e-1f2a-3b4c5d6e7f80}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ui\web">
+      <UniqueIdentifier>{e5f6a7b8-c9d0-4e1f-2a3b-4c5d6e7f8091}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="mss_1.2.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="analysis\basic.h">
+      <Filter>analysis</Filter>
+    </ClInclude>
+    <ClInclude Include="analysis\distribution.h">
+      <Filter>analysis</Filter>
+    </ClInclude>
+    <ClInclude Include="analysis\probability.h">
+      <Filter>analysis</Filter>
+    </ClInclude>
+    <ClInclude Include="analysis\structure.h">
+      <Filter>analysis</Filter>
+    </ClInclude>
+    <ClInclude Include="analysis\probability\approx.h">
+      <Filter>analysis\probability</Filter>
+    </ClInclude>
+    <ClInclude Include="analysis\probability\exact.h">
+      <Filter>analysis\probability</Filter>
+    </ClInclude>
+    <ClInclude Include="analysis\probability\rational.h">
+      <Filter>analysis\probability</Filter>
+    </ClInclude>
+    <ClInclude Include="core\assert.h">
+      <Filter>core</Filter>
+    </ClInclude>
+    <ClInclude Include="core\config.h">
+      <Filter>core</Filter>
+    </ClInclude>
+    <ClInclude Include="core\types.h">
+      <Filter>core</Filter>
+    </ClInclude>
+    <ClInclude Include="core\utility\flat_hashtable.h">
+      <Filter>core\utility</Filter>
+    </ClInclude>
+    <ClInclude Include="core\utility\grid.h">
+      <Filter>core\utility</Filter>
+    </ClInclude>
+    <ClInclude Include="core\utility\hash.h">
+      <Filter>core\utility</Filter>
+    </ClInclude>
+    <ClInclude Include="core\utility\radix_sort.h">
+      <Filter>core\utility</Filter>
+    </ClInclude>
+    <ClInclude Include="core\utility\rng.h">
+      <Filter>core\utility</Filter>
+    </ClInclude>
+    <ClInclude Include="ui\game_control.h">
+      <Filter>ui</Filter>
+    </ClInclude>
+    <ClInclude Include="ui\http_server.h">
+      <Filter>ui</Filter>
+    </ClInclude>
+    <ClInclude Include="ui\interactive.h">
+      <Filter>ui</Filter>
+    </ClInclude>
+    <ClInclude Include="ui\ui_app.h">
+      <Filter>ui</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="ui\web\index.html">
+      <Filter>ui\web</Filter>
+    </None>
+    <None Include="ui\web\main.js">
+      <Filter>ui\web</Filter>
+    </None>
+    <None Include="ui\web\style.css">
+      <Filter>ui\web</Filter>
+    </None>
+  </ItemGroup>
+</Project>

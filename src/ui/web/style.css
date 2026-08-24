@@ -1,0 +1,154 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: #d4d4d4;
+  font-family: Tahoma, "Microsoft YaHei", sans-serif;
+  font-size: 13px;
+  color: #000;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.menurow {
+  width: fit-content;
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 8px 8px 4px;
+}
+button {
+  background: #c0c0c0;
+  border: 1px solid #808080;
+  padding: 4px 12px;
+  font: 12px Tahoma, sans-serif;
+  color: #000;
+  cursor: pointer;
+}
+button:active { background: #a8a8a8; }
+button.active { background: #a8a8a8; font-weight: bold; }
+.spacer { flex: 1; }
+#custom-fields { display: inline-flex; gap: 6px; align-items: center; }
+#custom-fields[hidden] { display: none; }
+#custom-fields label { display: inline-flex; align-items: center; gap: 3px; font-size: 12px; }
+#custom-fields input {
+  width: 52px;
+  border: 1px solid #808080;
+  background: #fff;
+  padding: 2px;
+  font: 12px Tahoma, sans-serif;
+}
+#settings-btn { min-width: 76px; }
+#settings-menu {
+  position: absolute;
+  top: 100%;
+  right: 8px;
+  z-index: 10;
+  background: #c0c0c0;
+  border: 1px solid #808080;
+  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 140px;
+}
+#settings-menu[hidden] { display: none; }
+.settings-groups { display: flex; flex-direction: column; gap: 4px; }
+.sub-btn { width: 100%; text-align: left; }
+.sub-btn.active { font-weight: bold; background: #a8a8a8; }
+.submenu {
+  position: absolute;
+  right: 100%;
+  top: -2px;
+  margin-right: 2px;
+  z-index: 11;
+  /* 面板宽度按内容自适应（不要被参照容器 140px 封顶，否则中文会逐字折行） */
+  width: max-content;
+  max-width: calc(100vw - 40px);
+  background: #c0c0c0;
+  border: 1px solid #808080;
+  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 170px;
+}
+.submenu[hidden] { display: none; }
+#settings-menu label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  font-size: 12px;
+  cursor: pointer;
+}
+.statusbar {
+  width: fit-content;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 6px 8px;
+  padding: 6px 8px;
+  border: 1px solid #808080;
+  background: #b8b8b8;
+}
+.led {
+  background: #000;
+  color: #f00;
+  font: bold 20px "Courier New", monospace;
+  padding: 2px 6px;
+  min-width: 64px;
+  text-align: center;
+  border: 1px solid #808080;
+}
+.face { font-size: 20px; line-height: 1; padding: 2px 12px; }
+.main {
+  width: fit-content;
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  min-width: 0;
+  padding: 0 8px 8px;
+}
+.boardwrap {
+  /* 棋盘区域自己滚动：棋盘比视口宽/高时出现内部滚动条，
+     不再把详情面板挤到屏外。 */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(max(calc(100vw - 300px), 120px), calc(var(--view-px, 1216px) + 16px));
+  overflow: auto;
+  max-height: min(max(calc(100vh - 240px), 120px), calc(var(--view-px, 1216px) + 16px));
+  padding: 6px;
+  background: #b8b8b8;
+  border: 1px solid #808080;
+}
+#main-canvas { display: block; cursor: pointer; touch-action: manipulation; }
+.detail-panel {
+  /* 详情面板固定在右侧，始终可见；内容过长时面板内部滚动 */
+  flex: 0 0 230px;
+  width: 230px;
+  position: sticky;
+  top: 8px;
+  max-height: max(calc(100vh - 240px), 200px);
+  overflow-y: auto;
+  background: #c0c0c0;
+  border: 1px solid #808080;
+}
+.panel-title {
+  background: #000080;
+  color: #fff;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+.detail-panel pre {
+  margin: 0;
+  padding: 8px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: "Courier New", "Microsoft YaHei", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #000;
+}
