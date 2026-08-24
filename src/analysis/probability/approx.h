@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <utility>
 #include <vector>
@@ -159,7 +160,11 @@ inline long double Approx::solveRho(long double Ebar, long double Vbar,
         const long double dF = Vbar + tSum * sig * (1.0L - sig);
         const long double step = F / dF;
         theta -= step;
-        if (std::abs(step) < 1e-15L) break;
+        // 收敛判据：F 已到舍入噪声地板（|F| ≤ 100·ε·各项量级和）即停。
+        // 不能用 |step|<eps 的绝对判据（double 下 Ebar−M 抵消噪声 ~1e-14，
+        // 永不触发），也不能用相对 θ 的判据（θ≈0 根处同因振荡）。
+        const long double scale = std::abs(Ebar) + std::abs(Vbar * theta) + tSum + std::abs(M);
+        if (std::abs(F) <= 100.0L * LDBL_EPSILON * scale) break;
     }
     return 1.0L / (1.0L + std::exp(-theta));
 }

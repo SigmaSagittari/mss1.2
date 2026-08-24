@@ -45,9 +45,6 @@
     <ClInclude Include="analysis\distribution.h">
       <Filter>analysis</Filter>
     </ClInclude>
-    <ClInclude Include="analysis\probability.h">
-      <Filter>analysis</Filter>
-    </ClInclude>
     <ClInclude Include="analysis\structure.h">
       <Filter>analysis</Filter>
     </ClInclude>
@@ -96,11 +93,11 @@
     <ClInclude Include="analysis\rational.h">
       <Filter>analysis</Filter>
     </ClInclude>
+    <ClInclude Include="analysis\probability.h">
+      <Filter>analysis\probability</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <None Include="test\solve_rho_test.cpp">
-      <Filter>test</Filter>
-    </None>
     <None Include="ui\web\analyzer.js">
       <Filter>ui\web</Filter>
     </None>
@@ -112,6 +109,9 @@
     </None>
     <None Include="ui\web\style.css">
       <Filter>ui\web</Filter>
+    </None>
+    <None Include="test\solve_rho_test.cpp">
+      <Filter>test</Filter>
     </None>
   </ItemGroup>
 </Project>

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <utility>
 #include <vector>
@@ -31,13 +32,15 @@ struct Exact {
                                        Distribution::DistPool& pool);
 
     // 观察：点开格子 cell 的结果分布（爆炸概率 + 数字 0..8 概率）。
-    // 边界：cell 已标 Mine → explosion=1；已揭示/数字格 → 全 0。
+    // explosion = prob.mineProbability(cell)（P(x 是雷)，observe 不再自算）；
+    // 已揭示/数字格 → 全 0。
     // 算法：对每活连通块 forEachAssignment 枚举 box 雷数分配，每分配对
     // "邻域雷数贡献"做 box 超几何卷积 → 二维块贡献 (h, r)，跨块卷积后
-    // 按 T 格组合补足 → explosion / digit[0..8]。
+    // 按 T 格组合补足 → digit[0..8]。
     static Probability::ObserveResult observe(const ObservedBoard& board,
                                               const Basic::Result& basic,
                                               const Structure::Result& structure,
+                                              const Probability::Result& prob,
                                               Distribution::DistPool& pool, CellId cell);
 
 private:
@@ -226,6 +229,230 @@ inline Probability::Result Exact::analyze(const ObservedBoard& board,
     }
 
     return result;
+}
+
+// ── observe 实现 ──
+// 方案（纯查询，零修改）：爆炸概率 = prob.mineProbability(cell)，直接取自
+// analyze 的雷概率（已含全局预算卷积），不再自算；这里只算数字分布。
+// 把"被抓住"的部分（x 邻居所属连通块 + x 所在连通块 + T 邻居伪源）预计算成
+// 稀疏转移表 (h, y, w)，dp 逐表卷积得 dp[x][y]（x=邻居雷数，y=被抓住部分雷
+// 数），其余棋盘折成 f[t]（恰有 t 雷的摆法数），预算卷积 y+t=M 后归一化。
+inline Probability::ObserveResult Exact::observe(
+    const ObservedBoard& board, const Basic::Result& basic,
+    const Structure::Result& structure, const Probability::Result& prob,
+    Distribution::DistPool& pool, CellId cell) {
+    using Mark = Basic::Mark;
+    const auto [x, y] = board.pos(cell);
+    const int rows = board.rows, cols = board.cols;
+    const int tSum = basic.unknownSum;
+    const int M = board.totalMines - basic.mineSum;
+
+    Probability::ObserveResult out;
+
+    // 边界：已揭示格不可开 → 全 0；basic 已定雷 → explosion=1（无数字）。
+    if (board.board[x][y] != Cell::Hidden) return out;
+    if (basic.marks[x][y] == Mark::Mine) {
+        out.explosion = 1.0L;
+        return out;
+    }
+    const bool xInT = (basic.marks[x][y] == Mark::Unknown);
+    const CellLocation xloc = structure.cellLoc[static_cast<std::size_t>(cell)];
+    const bool xInBox = (xloc.component >= 0);
+    const ComponentId xCid = xloc.component;
+    const BoxId xBox = xloc.box;
+
+    // ── 步骤 1：被抓住的集合 = 邻居所属连通块 ∪ {x 所在连通块} ∪ T 邻居 ──
+    // 邻居分类：basic Mine → fixed 源（常数）；Unknown → T 邻居（伪源）；
+    //           Frontier → 所属连通块；已揭示数字 / Safe → 无贡献。
+    // x 所在连通块不在此显式加入：x 是 Frontier ⟹ 邻接已揭示数字，且该数字
+    // 属于 x 的连通块（cellLoc 回填），邻居循环必然捕获它；下方断言兜底。
+    // 必须被捕获的原因：x 安全因子（池子 s−1）住在它的 box 转移里。
+    int fixed = 0;
+    int uT = 0;
+    std::vector<ComponentId> captured;
+    std::vector<char> seen(structure.components.size(), 0);
+    forEachAdjacent(x, y, rows, cols, [&](int nx, int ny) {
+        if (basic.marks[nx][ny] == Mark::Mine) {
+            ++fixed;
+            return;
+        }
+        if (basic.marks[nx][ny] == Mark::Unknown) {
+            ++uT;
+            return;
+        }
+        const CellLocation loc = structure.cellLoc[static_cast<std::size_t>(board.id(nx, ny))];
+        if (loc.component == -1) return;  // 已揭示数字 / Safe
+        if (!seen[static_cast<std::size_t>(loc.component)]) {
+            seen[static_cast<std::size_t>(loc.component)] = 1;
+            captured.push_back(loc.component);
+        }
+    });
+    // x 在 box 里却未被捕获 = Basic/Structure 跨层不变式被破坏 → 概率静默错误。
+    assert_(!xInBox || seen[static_cast<std::size_t>(xCid)] != 0,
+            "Exact::observe: x 所在连通块未被捕获");
+
+    // ── 步骤 2：转移预计算 —— 每个被抓住连通块折成稀疏转移表 ──
+    // 每张表是 (h, y, w) 列表：邻域雷数贡献 h、块雷数 y、摆法数 w。
+    // 超几何/box 细节只活在这里；dp 只吃表，不知道 box 语义。
+    // maxY 是 dp 的 y 上限：被抓住部分总格数（T 伪源 u_T 格 + 被抓住各 box
+    // 格数）。x 恒非雷（爆炸概率取自 prob），其雷数不进 y。
+    struct Transfer {
+        int h;  // 邻域雷数贡献
+        int y;  // 块雷数
+        long double w;
+    };
+    int maxY = uT;
+    std::vector<std::vector<Transfer>> transfers;
+    for (ComponentId cid : captured) {
+        const Structure::Instance& inst = structure.components[static_cast<std::size_t>(cid)];
+        const Structure::Shape& shape = *inst.shape;
+        for (const auto& box : shape.boxes) maxY += box.size;
+        // 各 box 与 x 相邻的格数（预计算专用，不外泄）
+        std::vector<int> u(shape.boxes.size(), 0);
+        for (std::size_t b = 0; b < shape.boxes.size(); ++b)
+            for (std::size_t k = inst.boxes.boxOf[b]; k < inst.boxes.boxOf[b + 1]; ++k) {
+                const auto [cx, cy] = board.pos(inst.boxes.cells[k]);
+                if (std::abs(cx - x) <= 1 && std::abs(cy - y) <= 1 &&
+                    !(cx == x && cy == y))
+                    ++u[b];
+            }
+        // 枚举 box 雷数分配：y 由分配确定，邻域贡献是各相邻 box 超几何的卷积。
+        // 权重 = ways × conv[h]：ways 含非相邻 box 的 C(s,m)，conv 把相邻 box
+        // 的 C(s,m) 抵消、换成受限选格数（x 所在 box 池子恒为 s−1）。
+        int maxTotal = 0;
+        for (const auto& box : shape.boxes) maxTotal += box.size;
+        std::vector<std::array<long double, 9>> acc(
+            static_cast<std::size_t>(maxTotal + 1));
+        Distribution::Solver::forEachAssignment(
+            shape, [&](const std::vector<char>& assignment, long double ways) {
+                int yInc = 0;
+                std::array<long double, 9> conv{};
+                conv[0] = 1.0L;
+                for (std::size_t b = 0; b < assignment.size(); ++b) {
+                    const int m = assignment[b];
+                    yInc += m;
+                    const int ub = u[b];
+                    const bool isXBox = (cid == xCid &&
+                                         static_cast<BoxId>(b) == xBox);
+                    if (ub == 0 && !isXBox) continue;  // 不邻接且非 x 的 box：只进 y
+                    const int s = shape.boxes[b].size;
+                    const int pool = isXBox ? s - 1 : s;  // x 恒非雷：剔除 x
+                    std::array<long double, 9> dist{};
+                    const int rMax = (std::min)(ub, m);
+                    for (int r = 0; r <= rMax; ++r) {
+                        const int rest = m - r;
+                        if (rest > pool - ub) continue;
+                        dist[static_cast<std::size_t>(r)] =
+                            combLog(ub, r) * combLog(pool - ub, rest) /
+                            combLog(s, m);
+                    }
+                    // 卷积：conv ⊗ dist（h 平移 r）
+                    std::array<long double, 9> nc{};
+                    for (int h = 0; h <= 8; ++h)
+                        if (conv[static_cast<std::size_t>(h)] != 0.0L)
+                            for (int r = 0; r <= 8 - h; ++r)
+                                nc[static_cast<std::size_t>(h + r)] +=
+                                    conv[static_cast<std::size_t>(h)] *
+                                    dist[static_cast<std::size_t>(r)];
+                    conv = nc;
+                }
+                for (int h = 0; h <= 8; ++h)
+                    if (conv[static_cast<std::size_t>(h)] != 0.0L)
+                        acc[static_cast<std::size_t>(yInc)][static_cast<std::size_t>(h)] +=
+                            ways * conv[static_cast<std::size_t>(h)];
+            });
+        std::vector<Transfer> table;
+        for (int t = 0; t <= maxTotal; ++t)
+            for (int h = 0; h <= 8; ++h) {
+                const long double w =
+                    acc[static_cast<std::size_t>(t)][static_cast<std::size_t>(h)];
+                if (w != 0.0L) table.push_back(Transfer{h, t, w});
+            }
+        transfers.push_back(std::move(table));
+    }
+    // T 邻居伪源：u_T 个 size-1 box（每格 0/1 雷），同为一张 (r, r, C(u_T,r)) 表。
+    // 预算不在此约束，由步骤 5 的 f[M−y] 兜底。
+    if (uT > 0) {
+        std::vector<Transfer> table;
+        for (int r = 0; r <= uT; ++r)
+            table.push_back(Transfer{r, r, combLog(uT, r)});
+        transfers.push_back(std::move(table));
+    }
+
+    // ── 步骤 3：dp[x][y] —— 依次应用每张转移表 ──
+    // dp 语义：x = 邻居雷数(0..8)，y = 被抓住部分总雷数(0..maxY)，值为方案数。
+    const int stride = maxY + 1;
+    auto runDp = [&]() -> std::vector<long double> {
+        std::vector<long double> dp(static_cast<std::size_t>(9) * stride, 0.0L);
+        dp[0 * stride + 0] = 1.0L;
+        for (const auto& table : transfers) {
+            std::vector<long double> ndp(static_cast<std::size_t>(9) * stride, 0.0L);
+            for (const Transfer& t : table)
+                for (int xv = 0; xv + t.h <= 8; ++xv)
+                    for (int yv = 0; yv + t.y <= maxY; ++yv) {
+                        const long double base = dp[xv * stride + yv];
+                        if (base == 0.0L) continue;
+                        ndp[(xv + t.h) * stride + yv + t.y] += base * t.w;
+                    }
+            dp.swap(ndp);
+        }
+        return dp;
+    };
+
+    // ── 步骤 4：f[t] —— 其余部分（非被抓住连通块 + 剩余 T 格）恰有 t 雷的摆法数 ──
+    // T 池子 = tSum − u_T − [x∈T]：查询格 x 永不进其余部分，x∈T 时自身再剔除。
+    // f 的下标范围到 tPool + 非抓住组件最大雷数（组件格子也能吃雷）。
+    const int tPool = tSum - uT - (xInT ? 1 : 0);
+    Polynomial pRest(0, {1.0});
+    for (ComponentId cid = 0; cid < static_cast<ComponentId>(structure.components.size());
+         ++cid) {
+        const Structure::Instance& inst = structure.components[static_cast<std::size_t>(cid)];
+        if (!inst.alive || seen[static_cast<std::size_t>(cid)]) continue;
+        const Distribution* dist = Distribution::Solver::analyze(*inst.shape, pool);
+        pRest = pRest * Polynomial(*dist);
+    }
+    const int pRestMax =
+        pRest.coeffs.empty() ? 0 : pRest.start + static_cast<int>(pRest.coeffs.size()) - 1;
+    std::vector<long double> f(static_cast<std::size_t>(tPool + pRestMax) + 1, 0.0L);
+    for (std::size_t i = 0; i < pRest.coeffs.size(); ++i) {
+        const long double w = pRest.coeffs[i];
+        if (w == 0.0L) continue;
+        const int t1 = pRest.start + static_cast<int>(i);
+        // T 格最多吃 tPool 个雷（r 是 T 格雷数；组件雷数 t1 不受 tPool 限制）
+        for (int r = 0; r <= tPool; ++r)
+            f[static_cast<std::size_t>(t1 + r)] += w * combLog(tPool, r);
+    }
+
+    // ── 步骤 5：dp 与 f 的预算卷积（y + t = M），按邻居雷数分组 ──
+    const int fMax = static_cast<int>(f.size()) - 1;
+    const std::vector<long double> dpSafe = runDp();
+    std::array<long double, 9> F{};
+    for (int xv = 0; xv <= 8; ++xv)
+        for (int yv = 0; yv <= maxY; ++yv) {
+            const long double d = dpSafe[xv * stride + yv];
+            if (d == 0.0L) continue;
+            const int t = M - yv;
+            if (t < 0 || t > fMax) continue;
+            F[static_cast<std::size_t>(xv)] += d * f[static_cast<std::size_t>(t)];
+        }
+
+    // ── 步骤 6：explosion —— P(x 是雷) 直接取自 analyze 的雷概率 ──
+    // （mineProbability 已含全局预算卷积；observe 的 DP 只算 x 非雷的配置，
+    //   故 Σdigit + explosion = 1 由 N = ΣF + E 保证。）
+    out.explosion = prob.mineProbability(cell, board, basic, structure);
+
+    // ── 步骤 7：归一化（N = 全盘方案数，T 池子用 tSum，x 允许是雷）──
+    Polynomial pAll = pRest;
+    for (ComponentId cid : captured) {
+        const Structure::Instance& inst = structure.components[static_cast<std::size_t>(cid)];
+        const Distribution* dist = Distribution::Solver::analyze(*inst.shape, pool);
+        pAll = pAll * Polynomial(*dist);
+    }
+    const long double N = denominator(pAll, M, tSum);
+    for (int xv = 0; xv <= 8 && fixed + xv <= 8; ++xv)
+        out.digit[static_cast<std::size_t>(fixed + xv)] =
+            F[static_cast<std::size_t>(xv)] / N;
+    return out;
 }
 
 }  // namespace mss

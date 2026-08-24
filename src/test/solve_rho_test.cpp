@@ -19,6 +19,7 @@
 //   - 残差检查只在 (1e-6, 1-1e-6) 带内有效：更靠近边界时 1-rho（或 rho）
 //     的相对精度只有 ~1e-13..1e-8，logit 误差传导使残差失真到 ~1e-8。
 // ─────────────────────────────────────────────────────────────
+#include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <random>
@@ -71,19 +72,26 @@ static void verifySolve(ld Ebar, ld Vbar, ld M, ld tSum, ld rho, int iters, cons
     const bool ok1 = rho >= 0.0L && rho <= 1.0L;
     const bool ok2 = std::abs(rho - rhoRef) < 1e-12L;
     // 残差检查只在 (1e-6, 1-1e-6) 带内有效：更靠近边界时 1-rho（或 rho）
-    // 的相对精度只有 ~1e-13..1e-8，logit 误差传导使残差失真到 ~1e-8。
+    // 的相对精度有限，logit 误差传导使残差失真。
+    // 容差按精度自适应：MSVC 的 long double 就是 double（ε=2.2e-16），
+    // 近边界时残差噪声可达 Vbar·ε/(1−rho) 量级；g++ 的 80 位 long double
+    // （ε=1.1e-19）远低于 1e-9 下限，取 max 即可。
     const bool interior = rho > 1e-6L && rho < 1.0L - 1e-6L;
+    const ld scale = Ebar + tSum + M + Vbar / (std::min)(rho, 1.0L - rho);
+    const ld tol = (std::max)(1e-9L, 16.0L * LDBL_EPSILON * scale);
     const ld res = interior ? std::abs(F(Ebar, Vbar, M, tSum, rho)) : 0.0L;
-    const bool ok3 = !interior || res < 1e-9L;
+    const bool ok3 = !interior || res < tol;
     const bool ok4 = iters <= 0 || iters <= 10;
     ++gCheck;
     if (ok1 && ok2 && ok3 && ok4) return;
     ++gFail;
     std::printf("  FAIL: %s Ebar=%.6Lg Vbar=%.6Lg M=%.6Lg tSum=%.6Lg\n"
-                "        rho=%.18Lg thetaRef=%.6Lg rhoRef=%.18Lg diff=%.3Lg res=%.3Lg iters=%d [%d%d%d%d]\n",
+                "        rho=%.18Lg thetaRef=%.6Lg rhoRef=%.18Lg diff=%.3Lg res=%.3Lg tol=%.3Lg iters=%d [%d%d%d%d]\n",
                 tag, Ebar, Vbar, M, tSum, rho, thetaRef, rhoRef,
-                std::abs(rho - rhoRef), res, iters, ok1, ok2, ok3, ok4);
+                std::abs(rho - rhoRef), res, tol, iters, ok1, ok2, ok3, ok4);
 }
+
+static ld solveRhoCopy(ld Ebar, ld Vbar, ld M, ld tSum, int& iters);
 
 // ── A. 已知值（走真实 Approx 管线）──
 static void testKnown() {
@@ -123,6 +131,8 @@ static void testPipeline() {
     long long pos = 0, moves = 0, wins = 0;
     int vbar0 = 0, vbarPos = 0;
     ld maxRes = 0.0L;
+    long long itSum = 0;
+    int itMin = 99, itMax = 0;
     for (const auto& b : boards) {
         const int total = b.rows * b.cols;
         for (int trial = 0; trial < 40; ++trial) {
@@ -153,6 +163,13 @@ static void testPipeline() {
                 } else {
                     ++vbarPos;
                     verifySolve(app.Ebar, app.Vbar, M, tSum, rho, 0, "B: Vbar>0 核对");
+                    // 用算法副本复算拿迭代数（顺带核对副本与管线一致）
+                    int it = 0;
+                    const ld rhoCopy = solveRhoCopy(app.Ebar, app.Vbar, M, tSum, it);
+                    check(std::abs(rho - rhoCopy) < 1e-12L, "B: 副本与管线一致");
+                    itSum += it;
+                    itMin = (std::min)(itMin, it);
+                    itMax = (std::max)(itMax, it);
                     const ld res =
                         rho > 1e-6L && rho < 1.0L - 1e-6L
                             ? std::abs(F(app.Ebar, app.Vbar, M, tSum, rho))
@@ -191,6 +208,8 @@ static void testPipeline() {
     }
     std::printf("  局位 %lld 个（解析: %d，牛顿: %d），走棋 %lld 步，胜利 %lld 局，最大内部残差 %.3g\n",
                 pos, vbar0, vbarPos, moves, wins, (double)maxRes);
+    std::printf("  牛顿迭代: 平均 %.2f，min %d，max %d\n",
+                vbarPos ? (double)itSum / vbarPos : 0.0, itMin, itMax);
 }
 
 // ── C. 合成配置扫描（算法副本，与线上 solveRho 逐字相同）──
@@ -214,7 +233,9 @@ static ld solveRhoCopy(ld Ebar, ld Vbar, ld M, ld tSum, int& iters) {
         const ld dF = Vbar + tSum * s * (1.0L - s);
         const ld step = f / dF;
         theta -= step;
-        if (std::abs(step) < 1e-15L) break;
+        // 与线上一致：F 到舍入噪声地板即停（见 approx.h solveRho 注释）
+        const ld scale = std::abs(Ebar) + std::abs(Vbar * theta) + tSum + std::abs(M);
+        if (std::abs(f) <= 100.0L * LDBL_EPSILON * scale) break;
     }
     iters = it + 1;
     return sig(theta);
@@ -224,9 +245,11 @@ static void testSweep() {
     std::printf("== C. 合成配置扫描 ==\n");
     std::mt19937_64 rng(99);
     int worst = 0;
+    long long itSum = 0;
+    const int c1Count = 3000;
 
     // C1: 目标式随机 3000 组（真实量级参数，rho* 均匀覆盖全域）
-    for (int i = 0; i < 3000; ++i) {
+    for (int i = 0; i < c1Count; ++i) {
         const ld Ebar = (rng() % 6001u) / 100.0L;        // 0..60
         const ld Vbar = ((rng() % 5000u) + 1) / 1000.0L; // 0.001..5
         const ld tSum = (rng() % 6001u) / 10.0L;         // 0..600
@@ -235,6 +258,7 @@ static void testSweep() {
         int it = 0;
         const ld rho = solveRhoCopy(Ebar, Vbar, M, tSum, it);
         worst = (std::max)(worst, it);
+        itSum += it;
         check(std::abs(rho - rhoStar) < 1e-9L, "C1: 目标命中");
         check(std::abs(F(Ebar, Vbar, M, tSum, rho)) < 1e-9L, "C1: 残差");
     }
@@ -289,7 +313,7 @@ static void testSweep() {
         std::printf("  tSum=0 最坏迭代 %d\n", worstT0);
     }
 
-    std::printf("  目标式扫描最坏迭代 %d\n", worst);
+    std::printf("  目标式扫描最坏迭代 %d，平均 %.2f\n", worst, (double)itSum / c1Count);
 }
 
 int main() {
