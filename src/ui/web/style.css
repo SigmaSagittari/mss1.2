@@ -41,6 +41,7 @@ button.active { background: #a8a8a8; font-weight: bold; }
   font: 12px Tahoma, sans-serif;
 }
 #settings-btn { min-width: 76px; }
+#analyzer-btn { min-width: 64px; }
 #settings-menu {
   position: absolute;
   top: 100%;

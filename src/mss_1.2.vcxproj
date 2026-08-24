@@ -149,6 +149,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="analysis\basic.h" />
+    <ClInclude Include="analysis\bruteforce\endgame_bruteforce.h" />
     <ClInclude Include="analysis\distribution.h" />
     <ClInclude Include="analysis\probability.h" />
     <ClInclude Include="analysis\probability\approx.h" />

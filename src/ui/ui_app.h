@@ -20,7 +20,9 @@
 #include <utility>
 #include <vector>
 
+#include "analysis/bruteforce/endgame_bruteforce.h"
 #include "core/assert.h"
+#include "core/config.h"
 #include "ui/game_control.h"
 #include "ui/http_server.h"
 #include "ui/interactive.h"
@@ -73,6 +75,9 @@ private:
         if (p == "/api/flag" && req.method == "POST") return jsonFlag(req);
         if (p == "/api/probability") return jsonProbability();
         if (p == "/api/detail") return jsonDetail(req);
+        if (p == "/api/analyzer" && req.method == "POST") return jsonAnalyzer(req);
+        if (p == "/api/edit" && req.method == "POST") return jsonEdit(req);
+        if (p == "/api/analyze" && req.method == "POST") return jsonAnalyze();
         if (p == "/api/config") {
             if (req.method == "POST") return jsonConfig(req);
             return jsonConfigGet();
@@ -230,6 +235,9 @@ private:
         unsigned seed;
         if (!bodySeed(req.body, "seed", seed)) seed = std::random_device{}();
         game_ = std::make_unique<GameController>(rows, cols, mines, seed);
+        // 新局丢弃分析会话（编辑快照/分析态随旧局失效）。
+        editSaved_.reset();
+        analyzerActive_ = false;
         // 前端可随新局携带引擎模式（mode: "full"|"incremental"）。
         const std::string needle = "\"mode\"";
         const size_t pos = req.body.find(needle);
@@ -371,6 +379,128 @@ private:
         return out;
     }
 
+    // ---------- 全局分析（分析模式） ----------
+    // 分析模式：进入时快照原始盘面（退出还原），编辑直接改分析视图的 ObservedBoard；
+    // 每次点「开始分析」从（可能被编辑过的）盘面全量重构 basic/structure/probability，
+    // 不用增量 Approx 管线。合法性 → 候选数（精确）→ 低于暴力阈值则残局求解。
+    // 与当前引擎无关（候选数/暴力均基于 Exact 精确视图）。
+
+    // 进入/退出分析模式：进入保存盘面快照，退出还原（编辑不污染真实游戏盘面）。
+    HttpResponse jsonAnalyzer(const HttpRequest& req) {
+        const bool active = req.body.find("true") != std::string::npos;
+        auto& state = game_->analysis().state();
+        if (active) {
+            if (!analyzerActive_) editSaved_ = std::make_unique<ObservedBoard>(state);
+            analyzerActive_ = true;
+        } else {
+            if (analyzerActive_ && editSaved_) state = std::move(*editSaved_);
+            editSaved_.reset();
+            analyzerActive_ = false;
+        }
+        return json("{\"ok\":true}");
+    }
+
+    // 编辑：改分析视图的盘面格值（v=0..8 数字，9=盖上 Hidden）。仅分析模式生效。
+    HttpResponse jsonEdit(const HttpRequest& req) {
+        if (!analyzerActive_) return json("{\"ok\":true}");
+        const int x = bodyInt(req.body, "x");
+        const int y = bodyInt(req.body, "y");
+        const int v = bodyInt(req.body, "v");
+        auto& state = game_->analysis().state();
+        if (x >= 1 && x <= state.rows && y >= 1 && y <= state.cols && v >= 0 && v <= 9)
+            state.board[x][y] = (v == 9) ? Cell::Hidden : static_cast<Cell>(v);
+        return json("{\"ok\":true}");
+    }
+
+    // 概率网格 JSON 尾部（"tProb","prob" 两字段，接在已有 JSON 后）。
+    static std::string gridJson(const Grid<long double>& grid, long double tProb) {
+        std::ostringstream os;
+        os << std::setprecision(12) << ",\"tProb\":" << static_cast<double>(tProb)
+           << ",\"prob\":[";
+        for (int i = 1; i <= grid.rows(); ++i) {
+            if (i > 1) os << ',';
+            os << '[';
+            for (int j = 1; j <= grid.cols(); ++j) {
+                if (j > 1) os << ',';
+                os << static_cast<double>(grid[i][j]);
+            }
+            os << ']';
+        }
+        os << ']';
+        return os.str();
+    }
+
+    // 物化整盘概率网格（1-based）。basic/structure 与 grid 同源。
+    static Grid<long double> materializeGrid(const ObservedBoard& state,
+                                             const Basic::Result& basic,
+                                             const Structure::Result& structure,
+                                             const Probability::Result& prob) {
+        Grid<long double> grid(state.rows, state.cols, 0.0L);
+        for (int i = 1; i <= state.rows; ++i)
+            for (int j = 1; j <= state.cols; ++j)
+                grid[i][j] = prob.mineProbability(state.id(i, j), state, basic, structure);
+        return grid;
+    }
+
+    HttpResponse jsonAnalyze() {
+        // 从当前分析视图（可能被编辑过）全量重构，丢弃旧管线视图。
+        ObservedBoard& state = game_->analysis().state();
+        const Basic::Result basic = Basic::Analyzer::analyze(state);
+        Structure::ShapePool shapes;
+        const Structure::Result structure = Structure::Analyzer::analyze(state, basic, shapes);
+        Distribution::DistPool dists;
+
+        // 合法性 1：basic 矛盾（数字约束无解）。
+        if (!basic.valid)
+            return json("{\"valid\":false,\"reason\":\"盘面矛盾（basic 无解）\"}");
+
+        // 合法性 2：每个活连通块的分布非空（无可行摆法 = 结构矛盾）。
+        for (ComponentId cid = 0; cid < static_cast<ComponentId>(structure.components.size());
+             ++cid) {
+            const Structure::Instance& inst =
+                structure.components[static_cast<std::size_t>(cid)];
+            if (!inst.alive) continue;
+            const Distribution* dist = Distribution::Solver::analyze(*inst.shape, dists);
+            if (dist->entries.empty())
+                return json("{\"valid\":false,\"reason\":\"连通块无可行摆法（矛盾）\"}");
+        }
+
+        // 候选数（精确）：含 T 格组合，= all_distribute 会产出的总方案数。
+        const Probability::Result prob = Exact::analyze(state, basic, structure, dists);
+        const long double candidates = prob.candidates;
+        const Grid<long double> grid = materializeGrid(state, basic, structure, prob);
+
+        // 超过暴力枚举阈值：暂不处理，之后用中盘分析补上（概率网格仍给出）。
+        if (candidates > static_cast<long double>(kMaxBruteforceCount))
+            return json("{\"valid\":true,\"bruteforce\":false,\"candidates\":\"" +
+                        formatCount(candidates) +
+                        "\",\"reason\":\"候选方案数超过暴力阈值，中盘分析待实现\"" +
+                        gridJson(grid, prob.tCellProbability) + "}");
+
+        // 开始暴力：残局求解。
+        const auto t0 = std::chrono::steady_clock::now();
+        const EndgameBruteforce::Result r =
+            EndgameBruteforce::solveEndgame(state, basic, structure, dists, grid);
+        const auto t1 = std::chrono::steady_clock::now();
+        const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
+        const auto& mv = r.result[0];
+        const double winRate =
+            r.totalPossibilities > 0
+                ? static_cast<double>(mv.wins) / r.totalPossibilities * 100.0
+                : 0.0;
+        std::ostringstream os;
+        os << std::setprecision(6);
+        os << "{\"valid\":true,\"bruteforce\":true"
+           << ",\"candidates\":\"" << formatCount(candidates) << "\""
+           << ",\"total\":" << r.totalPossibilities
+           << ",\"firstMove\":[" << mv.x << "," << mv.y << "]"
+           << ",\"wins\":" << mv.wins << ",\"winRate\":" << winRate
+           << ",\"nodes\":" << r.nodes << ",\"ms\":" << ms
+           << gridJson(grid, prob.tCellProbability) << "}";
+        return json(os.str());
+    }
+
     void openBrowser() const {
         std::string url = "http://127.0.0.1:" + std::to_string(port_) + "/";
         ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
@@ -389,6 +519,8 @@ private:
 
     HttpServer server_;
     std::unique_ptr<GameController> game_;
+    std::unique_ptr<ObservedBoard> editSaved_;  // 分析模式进入时的盘面快照（退出还原）
+    bool analyzerActive_ = false;
     int port_ = 18080;
     int computedMs_ = 0;
 };

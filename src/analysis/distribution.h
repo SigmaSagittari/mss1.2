@@ -109,7 +109,7 @@ inline const Distribution* Distribution::DistPool::insert(const Structure::Shape
 // ── Solver 私有工具实现 ──
 
 inline long double Distribution::Solver::binom(int n, int k) {
-    constexpr int kMax = 8;
+    constexpr int kMax = 9;
     // 静态 constexpr 局部表，只在此函数内可见。
     static constexpr std::array<std::array<long double, kMax + 1>, kMax + 1> kComb = []() {
         std::array<std::array<long double, kMax + 1>, kMax + 1> t{};

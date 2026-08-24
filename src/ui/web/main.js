@@ -25,6 +25,9 @@ let startMs = null;
 let detailTimer = null;
 const detailCache = new Map();  // "x,y" -> 详情文本（盘面变化时清空）
 let prevEffects = new Set();    // 当前已绘制的按压效果格子（一维索引）
+let analyzer = false;           // 分析模式：保留盘面，禁止改盘操作
+let prevProb = false;           // 进入分析前的概率显示状态（退出时恢复）
+let editBoard = null;           // 分析模式的编辑副本（进入时复制当前盘面）
 
 const settings = {
   prob: false,
@@ -99,6 +102,15 @@ async function loadState() {
 }
 
 async function newGame(rows, cols, mines, seed) {
+  // 新开局自动退出分析模式（盘面被重置，分析上下文失效）
+  if (analyzer) {
+    analyzer = false;
+    editBoard = null;
+    const abtn = document.getElementById("analyzer-btn");
+    abtn.classList.remove("active");
+    abtn.textContent = "分析";
+    document.getElementById("analyze-section").hidden = true;
+  }
   // seed 缺省 = 随机：服务端生成新随机种子并回填到设置里；给定了就用指定种子
   const body = seed === undefined ? { rows, cols, mines } : { rows, cols, mines, seed };
   // 携带当前引擎模式（增量近似更新 / 全局重建），新局沿用
@@ -152,6 +164,62 @@ async function refreshProb() {
   }
 }
 
+// ---------- 全局分析 ----------
+async function runAnalyze() {
+  const el = document.getElementById("analyze-text");
+  el.textContent = "分析中…";
+  try {
+    const data = await post("/api/analyze", {});
+    // 用本次重构的精确概率网格刷新盘面覆盖（编辑后旧概率已失效）
+    if (data.prob) {
+      prob = {
+        prob: data.prob,
+        tProb: data.tProb,
+        candidates: data.candidates,
+        computedMs: data.ms,
+      };
+      render();
+    }
+    const lines = [];
+    if (!data.valid) {
+      lines.push("盘面不合法：");
+      lines.push(data.reason || "未知原因");
+    } else if (!data.bruteforce) {
+      lines.push("候选方案数: " + data.candidates);
+      lines.push("超过暴力阈值，无法暴力求解");
+      lines.push("（中盘分析待实现）");
+    } else {
+      lines.push("候选方案数: " + data.candidates);
+      lines.push("暴力枚举: " + data.total + " 个方案");
+      if (data.firstMove && data.firstMove[0] > 0) {
+        lines.push("最优首招: (" + data.firstMove[0] + ", " + data.firstMove[1] + ")");
+        lines.push("可保证赢下: " + data.wins + " / " + data.total);
+        lines.push("胜率: " + data.winRate.toFixed(2) + "%");
+      } else {
+        lines.push("无可分析格子");
+      }
+      lines.push("DFS 节点: " + data.nodes);
+      lines.push("计算耗时: " + data.ms + " ms");
+    }
+    el.textContent = lines.join("\n");
+  } catch (_) {
+    el.textContent = "分析失败（服务异常）";
+  }
+}
+
+// 编辑一格（分析模式）：更新本地编辑副本 + 同步后端分析视图。
+// 编辑后旧概率过期，等「开始分析」重算。
+async function editCell(x, y, next) {
+  editBoard[x - 1][y - 1] = next;
+  prob = null;
+  render();
+  try {
+    await post("/api/edit", { x, y, v: next });
+  } catch (_) { /* 忽略瞬时错误 */ }
+}
+
+document.getElementById("analyze-btn").addEventListener("click", runAnalyze);
+
 // ---------- 绘制 ----------
 function render() {
   if (!state) return;
@@ -195,8 +263,13 @@ function isPreview(i, j) {
   return false;
 }
 
+// 当前渲染盘面格值：分析模式用编辑副本，否则用游戏盘面。
+function boardAt(i, j) {
+  return editBoard ? editBoard[i][j] : state.board[i][j];
+}
+
 function drawCell(i, j) {
-  const v = state.board[i][j];
+  const v = boardAt(i, j);
   const px = j * cell;
   const py = i * cell;
   const isHover = hover && hover.x === i + 1 && hover.y === j + 1;
@@ -264,6 +337,13 @@ function drawCell(i, j) {
       drawEdgeMark(px, py, "#e00000");   // 雷：醒目红
     else if (p > 0)
       drawProbText(px, py, p);           // 中间概率：百分比文字
+  }
+
+  // 分析模式：悬停格画蓝框，标明「悬停 + 按数字键」会改哪格
+  if (analyzer && isHover) {
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "#0000ff";
+    ctx.strokeRect(px + 1, py + 1, cell - 2, cell - 2);
   }
 
   ctx.restore();
@@ -373,6 +453,17 @@ function updatePressEffects() {
 canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
 canvas.addEventListener("mousedown", (e) => {
+  if (analyzer) {
+    // 分析编辑：左键切换打开/关闭。数字点一下盖上；盖上（除旗）点一下变 0。
+    if (e.button !== 0) return;
+    const c = cellAt(e);
+    if (!c) return;
+    const v = boardAt(c.x - 1, c.y - 1);
+    if (v === -2) return;  // 旗格不参与编辑
+    const next = (v === -1 || v === -3 || v === -4) ? 0 : -1;
+    editCell(c.x, c.y, next);
+    return;
+  }
   if (e.button === 0) {
     pressing = true;
     hover = cellAt(e);
@@ -415,6 +506,7 @@ canvas.addEventListener("mouseleave", () => {
 
 // ---------- 详细信息面板 ----------
 function scheduleDetail(c) {
+  if (analyzer) return;  // 分析模式：编辑后服务端详情已过期，不请求
   clearTimeout(detailTimer);
   const el = document.getElementById("detail-text");
   if (!c) {
@@ -499,9 +591,14 @@ document.getElementById("face").addEventListener("click", restartCurrent);
 
 // 空格重新开始（输入框聚焦时不拦截）
 window.addEventListener("keydown", (e) => {
-  if (e.code !== "Space" || e.repeat) return;
   const t = e.target;
   if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+  if (analyzer) {
+    // 分析编辑：悬停格 + 按 0~8 → 该格变为对应数字
+    if (hover && e.key >= "0" && e.key <= "8") editCell(hover.x, hover.y, parseInt(e.key, 10));
+    return;  // 分析模式不重开，保留当前盘面
+  }
+  if (e.code !== "Space" || e.repeat) return;
   e.preventDefault();
   restartCurrent();
 });
@@ -539,6 +636,45 @@ document.getElementById("opt-analysis-mode").addEventListener("change", async (e
     await post("/api/config", { mode: settings.analysisMode });
   } catch (_) { /* 忽略瞬时错误，下次请求会重新同步 */ }
 });
+
+// 分析按钮：一键切换到分析页面（保留当前盘面，不开始计算）。
+// 进入：快照盘面 + 显示概率 + 开启编辑 + 显示「开始分析」；
+// 退出：还原盘面 + 恢复概率状态 + 隐藏分析区。
+document.getElementById("analyzer-btn").addEventListener("click", async () => {
+  const btn = document.getElementById("analyzer-btn");
+  if (analyzer) await exitAnalyzer(btn);
+  else await enterAnalyzer(btn);
+});
+
+async function enterAnalyzer(btn) {
+  analyzer = true;
+  btn.classList.add("active");
+  btn.textContent = "退出分析";
+  await post("/api/analyzer", { active: true });  // 服务端快照原始盘面
+  editBoard = state.board.map((row) => row.slice());  // 本地编辑副本
+  document.getElementById("analyze-section").hidden = false;
+  document.getElementById("detail-text").textContent =
+    "分析模式：点击切换开/关，悬停按 0~8 设数字";
+  prevProb = settings.prob;
+  settings.prob = true;
+  document.getElementById("opt-prob").checked = true;
+  await refreshProb();
+  render();
+}
+
+async function exitAnalyzer(btn) {
+  analyzer = false;
+  btn.classList.remove("active");
+  btn.textContent = "分析";
+  editBoard = null;
+  document.getElementById("analyze-section").hidden = true;
+  settings.prob = prevProb;
+  document.getElementById("opt-prob").checked = prevProb;
+  prob = null;
+  await post("/api/analyzer", { active: false });  // 服务端还原盘面
+  state = await api("/api/state");                  // 重新拉取真实盘面
+  render();
+}
 
 // 手动指定种子：用设置里的值开新局（不覆盖输入框，棋盘由该种子决定）
 document.getElementById("seed-start").addEventListener("click", async () => {
