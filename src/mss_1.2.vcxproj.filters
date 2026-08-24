@@ -20,6 +20,9 @@
     <Filter Include="core\utility">
       <UniqueIdentifier>{c3d4e5f6-a7b8-4c9d-0e1f-2a3b4c5d6e7f}</UniqueIdentifier>
     </Filter>
+    <Filter Include="test">
+      <UniqueIdentifier>{7f8a9b0c-1d2e-4f3a-8b4c-5d6e7f8091a2}</UniqueIdentifier>
+    </Filter>
     <Filter Include="ui">
       <UniqueIdentifier>{d4e5f6a7-b8c9-4d0e-1f2a-3b4c5d6e7f80}</UniqueIdentifier>
     </Filter>
@@ -52,9 +55,6 @@
       <Filter>analysis\probability</Filter>
     </ClInclude>
     <ClInclude Include="analysis\probability\exact.h">
-      <Filter>analysis\probability</Filter>
-    </ClInclude>
-    <ClInclude Include="analysis\probability\rational.h">
       <Filter>analysis\probability</Filter>
     </ClInclude>
     <ClInclude Include="core\assert.h">
@@ -93,8 +93,14 @@
     <ClInclude Include="ui\ui_app.h">
       <Filter>ui</Filter>
     </ClInclude>
+    <ClInclude Include="analysis\rational.h">
+      <Filter>analysis</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
+    <None Include="test\solve_rho_test.cpp">
+      <Filter>test</Filter>
+    </None>
     <None Include="ui\web\analyzer.js">
       <Filter>ui\web</Filter>
     </None>

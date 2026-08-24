@@ -154,7 +154,7 @@
     <ClInclude Include="analysis\probability.h" />
     <ClInclude Include="analysis\probability\approx.h" />
     <ClInclude Include="analysis\probability\exact.h" />
-    <ClInclude Include="analysis\probability\rational.h" />
+    <ClInclude Include="analysis\rational.h" />
     <ClInclude Include="analysis\structure.h" />
     <ClInclude Include="core\assert.h" />
     <ClInclude Include="core\config.h" />
@@ -170,6 +170,7 @@
     <ClInclude Include="ui\ui_app.h" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="test\solve_rho_test.cpp" />
     <None Include="ui\web\analyzer.js" />
     <None Include="ui\web\index.html" />
     <None Include="ui\web\main.js" />

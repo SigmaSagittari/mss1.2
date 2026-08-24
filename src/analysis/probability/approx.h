@@ -7,7 +7,7 @@
 
 #include "analysis/distribution.h"
 #include "analysis/probability.h"
-#include "analysis/probability/rational.h"
+#include "analysis/rational.h"
 #include "analysis/structure.h"
 #include "core/assert.h"
 #include "core/types.h"
@@ -19,18 +19,18 @@ namespace mss {
 //
 // 精确引擎在大棋盘上组合爆炸，这里改走单连通块的一/二阶矩近似：
 //   1. 每连通块从分布提取 (mu, sigma2, logWays)，累计成全局矩。
-//   2. 守恒方程 F(θ) = Ebar + Vbar·θ + tSum·σ(θ) − M = 0 解 ρ：
+//   2. 守恒方程 F(θ) = Ebar + Vbar·θ + tSum·σ(θ) − M = 0 解 ρ（θ=logit(ρ)）：
 //        Vbar=0 → 解析解 σ=(M−Ebar)/tSum（零迭代）；
-//        Vbar>0 → 对 ρ 直接牛顿（边界稳定，二次收敛）。
+//        Vbar>0 → logit 空间对 θ 牛顿（无边界钳位，二次收敛，实测 ≤6 次）。
 //   3. 系数层 RhoRational 把分布压成以 ρ 为参数的 box 概率函数：
 //      单格查询 = eval(系数, ρ)，O(maxD)，无需全量落格。
 //
 // 与 Exact 的区别：Exact 无状态、每次全量重算、填数值 Result；
-// Approx 有 Result（跨 update 累积全局矩），增量更新只重建变化
-// 连通块的系数，rho 是 O(1) 全局标量 —— 这是"增量近似更新"的本体。
+// Approx 有 Result（跨 update 累积全局矩），增量更新只增删变化
+// 连通块的密度，rho 是 O(1) 全局标量 —— 这是"增量近似更新"的本体。
 //
 // 数据类：ShapeDensity / Result；算法类：Analyzer / Updater；
-// 单格查询走 RhoRational::eval。数学细节（牛顿、鞍点）全私有。
+// 单格查询走 RhoRational::eval（系数由查询路径惰性记忆化）。数学细节全私有。
 // ─────────────────────────────────────────────────────────────
 
 struct Approx {
@@ -53,19 +53,19 @@ struct Approx {
     };
 
     struct Analyzer {
-        // 全量构建（首次开局 / 重新对齐）：从零算全部实例密度 + 系数。
+        // 全量构建（首次开局 / 重新对齐）：从零算全部实例密度 + 全局矩。
         static Result analyze(const ObservedBoard& board, const Basic::Result& basic,
                               const Structure::Result& structure,
-                              Distribution::DistPool& dists, RhoRational::Pool& rationals);
+                              Distribution::DistPool& dists);
     };
 
     struct Updater {
-        // 增量：消费 Structure::Delta，只增减变化实例的密度与全局矩，
-        // 只重建变化连通块的系数，重解 rho。就地改 result。
+        // 增量：消费 Structure::Delta，只增减变化实例的密度与全局矩，重解 rho。
+        // 就地改 result。系数层 RhoRational 由查询路径惰性记忆化，无需预热。
         static void update(const ObservedBoard& board, const Basic::Result& basic,
                            const Structure::Result& structure,
-                           Distribution::DistPool& dists, RhoRational::Pool& rationals,
-                           Result& result, const Structure::Delta& delta);
+                           Distribution::DistPool& dists, Result& result,
+                           const Structure::Delta& delta);
     };
 
     // 观察：点开格子 cell 的结果分布（爆炸概率 + 数字 0..8 概率）。
@@ -83,7 +83,8 @@ private:
     static ShapeDensity mineDensity(const Distribution& dist);
 
     // 解守恒方程得非前沿格密度 ρ。
-    //   Vbar=0 → 解析解；Vbar>0 → 对 ρ 牛顿（边界稳定，二次收敛）。
+    //   Vbar<1e-10（含 0 与噪声级）→ 解析解；Vbar≥1e-10 → logit 空间对 θ 牛顿
+    //   （θ 仅内部使用，不对外）。
     static long double solveRho(long double Ebar, long double Vbar,
                                 long double M, long double tSum);
 
@@ -127,35 +128,40 @@ inline Approx::ShapeDensity Approx::mineDensity(const Distribution& dist) {
 
 inline long double Approx::solveRho(long double Ebar, long double Vbar,
                                     long double M, long double tSum) {
-    // Vbar=0：方程退化为线性 Ebar + tSum·σ − M = 0，σ 解析可得，
-    // 且天然落在 (0,1)（前端组合数保证 M−Ebar ∈ [0, tSum]），零迭代。
-    if (Vbar == 0.0L) {
+    // Vbar=0（含噪声级：增量累积的浮点残留。真实方差要么精确 0，要么
+    // ≥1e-2 量级，1e-10 以下必是噪声）：方程退化为线性 Ebar + tSum·σ − M = 0，
+    // σ 解析可得，且天然落在 (0,1)（前端组合数保证 M−Ebar ∈ [0, tSum]），零迭代。
+    // 噪声级 Vbar 若走牛顿：根在 σ~1e-19 处，dF 被 tSum·σ(1−σ) 主导，
+    // 每步只把 θ 挪 ~1，10 次收敛不到——按 0 处理直接给解析解。
+    if (Vbar < 1e-10L) {
         if (tSum <= 0.0L) return 0.0L;  // 无非前沿格：rho 无定义，返回 0（无人查询）
         const long double rho = (M - Ebar) / tSum;
         return (rho < 0.0L) ? 0.0L : (rho > 1.0L ? 1.0L : rho);
     }
 
-    // Vbar>0：直接对 ρ 牛顿。dF/dρ = Vbar/(ρ(1−ρ)) + tSum 在边界发散，
-    // 数值稳定；根唯一（F 严格单调），4~8 步二次收敛到机器精度。
-    long double rho = 0.5L;
+    // Vbar>0：logit 空间对 θ 牛顿。θ = logit(ρ)，σ(θ) = 1/(1+e^-θ)：
+    //   F(θ) = Ebar + Vbar·θ + tSum·σ(θ) − M，F'(θ) = Vbar + tSum·σ(1−σ) ≥ Vbar > 0。
+    // θ∈ℝ 无边界，σ(θ)∈(0,1) 恒在域内——无钳位、无越界。ρ 空间牛顿在边界
+    // （rho<0.05 或 >0.95）会大步越界、钳位后退化为线性爬升，12 次仍不收敛；
+    // logit 空间根除该问题：边界场景 1~6 次、二次收敛。θ 仅内部计算。
+    long double theta = 0.0L;
     if (tSum > 0.0L) {
-        rho = 0.5L * M / (Ebar + 0.5L * tSum);
-        if (!(rho > 0.0L) || rho >= 1.0L) rho = 0.5L;
-        if (rho < 1e-12L) rho = 1e-12L;
-        if (rho > 1.0L - 1e-12L) rho = 1.0L - 1e-12L;
+        // 初值：Vbar=0 的解析解（线性近似）钳到安全开区间后转 logit，
+        // 边界处 θ 空间近似仿射，常 0~1 次命中。
+        long double r = (M - Ebar) / tSum;
+        if (r < 1e-3L) r = 1e-3L;
+        if (r > 1.0L - 1e-3L) r = 1.0L - 1e-3L;
+        theta = std::log(r / (1.0L - r));
     }
-    for (int iter = 0; iter < 12; ++iter) {
-        const long double theta = std::log(rho / (1.0L - rho));
-        const long double F = Ebar + Vbar * theta + tSum * rho - M;
-        const long double dF = Vbar / (rho * (1.0L - rho)) + tSum;
-        if (dF == 0.0L) break;
+    for (int iter = 0; iter < 10; ++iter) {  // 实测 ≤6 次，10 纯防御
+        const long double sig = 1.0L / (1.0L + std::exp(-theta));
+        const long double F = Ebar + Vbar * theta + tSum * sig - M;
+        const long double dF = Vbar + tSum * sig * (1.0L - sig);
         const long double step = F / dF;
-        rho -= step;
-        if (rho <= 0.0L) rho = 1e-15L;
-        if (rho >= 1.0L) rho = 1.0L - 1e-15L;
+        theta -= step;
         if (std::abs(step) < 1e-15L) break;
     }
-    return rho;
+    return 1.0L / (1.0L + std::exp(-theta));
 }
 
 inline long double Approx::estimateCandidates(long double Ebar, long double Vbar,
@@ -180,22 +186,20 @@ inline long double Approx::lnComb(int n, int k) {
 inline Approx::Result Approx::Analyzer::analyze(const ObservedBoard& board,
                                                 const Basic::Result& basic,
                                                 const Structure::Result& structure,
-                                                Distribution::DistPool& dists,
-                                                RhoRational::Pool& rationals) {
+                                                Distribution::DistPool& dists) {
     const long double M = static_cast<long double>(board.totalMines - basic.mineSum);
     const long double tSum = static_cast<long double>(basic.unknownSum);
 
     Result result;
     result.instanceDensity.resize(structure.components.size());
 
-    // 活组件（跳过墓碑）：累计全局矩 + 确保系数缓存。
+    // 活组件（跳过墓碑）：累计全局矩。
     for (ComponentId cid = 0; cid < static_cast<ComponentId>(structure.components.size());
          ++cid) {
         const Structure::Instance& inst =
             structure.components[static_cast<std::size_t>(cid)];
         if (!inst.alive) continue;
         const Distribution* dist = Distribution::Solver::analyze(*inst.shape, dists);
-        RhoRational::Solver::analyze(*inst.shape, *dist, rationals);
         const ShapeDensity d = mineDensity(*dist);
         result.instanceDensity[static_cast<std::size_t>(cid)] = d;
         result.Ebar += d.mu;
@@ -212,8 +216,7 @@ inline Approx::Result Approx::Analyzer::analyze(const ObservedBoard& board,
 inline void Approx::Updater::update(const ObservedBoard& board,
                                     const Basic::Result& basic,
                                     const Structure::Result& structure,
-                                    Distribution::DistPool& dists,
-                                    RhoRational::Pool& rationals, Result& result,
+                                    Distribution::DistPool& dists, Result& result,
                                     const Structure::Delta& delta) {
     const long double M = static_cast<long double>(board.totalMines - basic.mineSum);
     const long double tSum = static_cast<long double>(basic.unknownSum);
@@ -226,13 +229,12 @@ inline void Approx::Updater::update(const ObservedBoard& board,
         result.logWaysSum -= d.logWays;
     }
 
-    // 新重建的连通块：算密度 + 累计全局矩 + 确保系数缓存。
+    // 新重建的连通块：算密度 + 累计全局矩。
     result.instanceDensity.resize(structure.components.size());
     for (ComponentId cid : delta.added) {
         const Structure::Instance& inst =
             structure.components[static_cast<std::size_t>(cid)];
         const Distribution* dist = Distribution::Solver::analyze(*inst.shape, dists);
-        RhoRational::Solver::analyze(*inst.shape, *dist, rationals);
         const ShapeDensity d = mineDensity(*dist);
         result.instanceDensity[static_cast<std::size_t>(cid)] = d;
         result.Ebar += d.mu;

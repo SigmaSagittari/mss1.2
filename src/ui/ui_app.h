@@ -290,7 +290,7 @@ private:
     // ---------- 概率 ----------
     HttpResponse jsonProbability() {
         const auto& gi = game_->info();
-        const auto& an = game_->analysis();
+        auto& an = game_->analysis();
         const Grid<long double> grid = Interactive::materializeProbability(an);
 
         std::ostringstream os;

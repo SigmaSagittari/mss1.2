@@ -9,7 +9,7 @@
 #include "analysis/probability.h"
 #include "analysis/probability/approx.h"
 #include "analysis/probability/exact.h"
-#include "analysis/probability/rational.h"
+#include "analysis/rational.h"
 #include "analysis/structure.h"
 #include "core/types.h"
 #include "core/utility/rng.h"
@@ -66,8 +66,7 @@ struct GameController {
             if (engine_ == Engine::Exact)
                 prob_ = Exact::analyze(state_, basic_, structure_, dists_);
             else
-                Approx::Updater::update(state_, basic_, structure_, dists_, rationals_,
-                                        approx_, delta);
+                Approx::Updater::update(state_, basic_, structure_, dists_, approx_, delta);
         }
 
         // 切换引擎（重新全量初始化当前引擎的状态）。
@@ -83,9 +82,11 @@ struct GameController {
         const Structure::Result& structure() const { return structure_; }
         const Probability::Result& probability() const { return prob_; }
 
-        // 引擎内部状态访问（供 Interactive 层查询/物化，只读）。
+        // 引擎内部状态访问（供 Interactive 层查询/物化）。
         const Approx::Result& approx() const { return approx_; }
-        const RhoRational::Pool& rationals() const { return rationals_; }
+        // 池访问（RhoRational 惰性记忆化需要可变引用；只读查询也走这里）。
+        Distribution::DistPool& dists() { return dists_; }
+        RhoRational::Pool& rationals() { return rationals_; }
 
         ObservedBoard& state() { return state_; }
         const ObservedBoard& state() const { return state_; }
@@ -96,8 +97,7 @@ struct GameController {
             if (engine_ == Engine::Exact)
                 prob_ = Exact::analyze(state_, basic_, structure_, dists_);
             else
-                approx_ = Approx::Analyzer::analyze(state_, basic_, structure_, dists_,
-                                                    rationals_);
+                approx_ = Approx::Analyzer::analyze(state_, basic_, structure_, dists_);
         }
 
         ObservedBoard state_;                  // 分析视图（数字/Hidden），经 update 维护

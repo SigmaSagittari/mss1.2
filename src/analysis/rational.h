@@ -72,10 +72,12 @@ struct RhoRational {
 
     // 盘面坐标查询：封装 cell → cellLoc → (cid, boxId) → 系数 → eval(rho)。
     // 非连通块：Mine→1 / Unknown→rho / Safe→0；约束数字格（已揭示）→0。
+    // 惰性记忆化：首次查询某 shape 时现算分布 + 系数并缓存（幂等命中），
+    // 缓存由本层自己维护，调用方无需预热。
     // 这是 UI / 搜索层拿"某格雷概率"的统一入口，引擎无关。
     static long double eval(int x, int y, const ObservedBoard& board,
                             const Basic::Result& basic, const Structure::Result& structure,
-                            const Pool& pool, long double rho);
+                            Distribution::DistPool& dists, Pool& pool, long double rho);
 };
 
 // ── 实现区 ──
@@ -105,7 +107,8 @@ inline long double RhoRational::eval(const Box& box, long double rho) {
 
 inline long double RhoRational::eval(int x, int y, const ObservedBoard& board,
                                      const Basic::Result& basic,
-                                     const Structure::Result& structure, const Pool& pool,
+                                     const Structure::Result& structure,
+                                     Distribution::DistPool& dists, Pool& pool,
                                      long double rho) {
     const CellLocation loc = structure.cellLoc[static_cast<std::size_t>(board.id(x, y))];
     if (loc.component == -1) {
@@ -116,10 +119,9 @@ inline long double RhoRational::eval(int x, int y, const ObservedBoard& board,
     if (loc.box == -1) return 0.0L;  // 约束数字格（已揭示）
     const Structure::Instance& inst =
         structure.components[static_cast<std::size_t>(loc.component)];
-    // 前置条件：Analyzer/Updater 已确保该 shape 的系数在池中（live 组件必经
-    // Distribution::Solver::analyze + RhoRational::Solver::analyze）。
-    const std::vector<Box>* boxes = pool.get(inst.shape);
-    assert_(boxes != nullptr, "RhoRational::eval: 系数未算");
+    // 惰性记忆化：首次查询该 shape 时现算分布 + 系数并缓存（幂等命中即返回）。
+    const Distribution* dist = Distribution::Solver::analyze(*inst.shape, dists);
+    const std::vector<Box>* boxes = Solver::analyze(*inst.shape, *dist, pool);
     const Box& box = (*boxes)[static_cast<std::size_t>(loc.box)];
     // num 存的是"box 期望雷数 × 权重"，eval 得期望雷数；除以 box 大小得单格概率。
     const long double perCell = RhoRational::eval(box, rho);

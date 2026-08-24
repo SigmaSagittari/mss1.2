@@ -8,7 +8,7 @@
 #include "analysis/distribution.h"
 #include "analysis/probability.h"
 #include "analysis/probability/exact.h"
-#include "analysis/probability/rational.h"
+#include "analysis/rational.h"
 #include "analysis/structure.h"
 #include "core/config.h"
 #include "core/types.h"
@@ -30,7 +30,8 @@ namespace Interactive {
 // ── 引擎无关查询（基于当前 Analysis 管线）──
 
 // 单格雷概率（Mine→1，Unknown→tProb/rho，Safe→0，前沿格→boxProbs）。
-inline long double mineProbability(const GameController::Analysis& an, int x, int y);
+// 非 const：RhoRational 惰性记忆化会就地补缓存（幂等，不影响结果）。
+inline long double mineProbability(GameController::Analysis& an, int x, int y);
 
 // 候选方案数。
 inline long double candidates(const GameController::Analysis& an);
@@ -39,7 +40,7 @@ inline long double candidates(const GameController::Analysis& an);
 inline long double tCellProbability(const GameController::Analysis& an);
 
 // 整盘概率网格物化（1-based，与棋盘一致）。逐格查询，O(rows*cols)。
-inline Grid<long double> materializeProbability(const GameController::Analysis& an);
+inline Grid<long double> materializeProbability(GameController::Analysis& an);
 
 // 当前引擎为 Approx 时，用精确引擎全量重算某格雷概率（详情面板对比用）。
 inline long double exactMineProbability(const GameController::Analysis& an, int x, int y);
@@ -68,13 +69,13 @@ inline AnalyzeResult analyze(const ObservedBoard& board);
 
 // ── 实现区 ──
 
-inline long double mineProbability(const GameController::Analysis& an, int x, int y) {
+inline long double mineProbability(GameController::Analysis& an, int x, int y) {
     using Engine = GameController::Analysis::Engine;
     if (an.engine() == Engine::Exact)
         return an.probability().mineProbability(an.state().id(x, y), an.state(),
                                                 an.basicMarks(), an.structure());
     return RhoRational::eval(x, y, an.state(), an.basicMarks(), an.structure(),
-                             an.rationals(), an.approx().rho);
+                             an.dists(), an.rationals(), an.approx().rho);
 }
 
 inline long double candidates(const GameController::Analysis& an) {
@@ -87,7 +88,7 @@ inline long double tCellProbability(const GameController::Analysis& an) {
     return an.engine() == Engine::Exact ? an.probability().tCellProbability : an.approx().rho;
 }
 
-inline Grid<long double> materializeProbability(const GameController::Analysis& an) {
+inline Grid<long double> materializeProbability(GameController::Analysis& an) {
     Grid<long double> grid(an.state().rows, an.state().cols, 0.0L);
     for (int x = 1; x <= an.state().rows; ++x)
         for (int y = 1; y <= an.state().cols; ++y)
