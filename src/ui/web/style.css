@@ -127,13 +127,17 @@ button.active { background: #a8a8a8; font-weight: bold; }
 }
 #main-canvas { display: block; cursor: pointer; touch-action: manipulation; }
 .detail-panel {
-  /* 详情面板固定在右侧，始终可见；内容过长时面板内部滚动 */
-  flex: 0 0 230px;
+  /* 详情面板固定在右侧，始终可见；内容过长时面板内部滚动；
+     右下角可拖动调整宽高（resize），拖宽后长行不再断行 */
+  flex: 0 1 auto;
   width: 230px;
+  min-width: 180px;
+  max-width: min(480px, 60vw);
   position: sticky;
   top: 8px;
   max-height: max(calc(100vh - 240px), 200px);
-  overflow-y: auto;
+  overflow: auto;
+  resize: both;
   background: #c0c0c0;
   border: 1px solid #808080;
 }

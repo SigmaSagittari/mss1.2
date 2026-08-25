@@ -45,6 +45,13 @@ inline Grid<long double> materializeProbability(GameController::Analysis& an);
 // 当前引擎为 Approx 时，用精确引擎全量重算某格雷概率（详情面板对比用）。
 inline long double exactMineProbability(const GameController::Analysis& an, int x, int y);
 
+// 点开某格的结果分布（explosion + digit[0..8]），详情面板查询。
+// Exact 引擎复用当前 Result；Approx 引擎现算精确视图（与 exactMineProbability 同源）。
+inline Probability::ObserveResult observe(GameController::Analysis& an, int x, int y);
+
+// 始终用精确引擎计算点开分布（详情面板 Approx 模式对比用；现算全量）。
+inline Probability::ObserveResult exactObserve(GameController::Analysis& an, int x, int y);
+
 // ── 全局分析（编辑后的盘面全量重构）──
 
 // 一次全局分析的结果。
@@ -102,6 +109,27 @@ inline long double exactMineProbability(const GameController::Analysis& an, int 
         Exact::analyze(an.state(), an.basicMarks(), an.structure(), dists);
     return exact.mineProbability(an.state().id(x, y), an.state(), an.basicMarks(),
                                  an.structure());
+}
+
+inline Probability::ObserveResult observe(GameController::Analysis& an, int x, int y) {
+    using Engine = GameController::Analysis::Engine;
+    const ObservedBoard& state = an.state();
+    const auto& basic = an.basicMarks();
+    const auto& structure = an.structure();
+    if (an.engine() == Engine::Exact)
+        return Exact::observe(state, basic, structure, an.probability(), an.dists(),
+                              state.id(x, y));
+    return Approx::observe(state, basic, structure, an.dists(), an.approx(),
+                           state.id(x, y));
+}
+
+inline Probability::ObserveResult exactObserve(GameController::Analysis& an, int x, int y) {
+    const ObservedBoard& state = an.state();
+    const auto& basic = an.basicMarks();
+    const auto& structure = an.structure();
+    Distribution::DistPool dists;
+    const Probability::Result exact = Exact::analyze(state, basic, structure, dists);
+    return Exact::observe(state, basic, structure, exact, dists, state.id(x, y));
 }
 
 inline AnalyzeResult analyze(const ObservedBoard& state) {

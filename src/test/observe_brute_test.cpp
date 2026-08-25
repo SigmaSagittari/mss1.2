@@ -8,6 +8,7 @@
 #include "analysis/basic.h"
 #include "analysis/distribution.h"
 #include "analysis/probability.h"
+#include "analysis/probability/approx.h"
 #include "analysis/probability/exact.h"
 #include "analysis/structure.h"
 #include "core/types.h"
@@ -40,6 +41,28 @@ static void check(bool ok, const char* what) {
         ++gFail;
         std::printf("  FAIL: %s\n", what);
     }
+}
+
+// ── Approx 误差分桶：按 rho 初始相对误差分档，统计各档内实际数字/爆炸误差 ──
+// 回答"rho 相对误差 X 时，最多可能看到多大的数字误差"。
+static constexpr int kRhoBucketCount = 8;
+static long long gBucketCells[kRhoBucketCount] = {};   // 每桶格数
+static long long gBucketChecks[kRhoBucketCount] = {};  // 每桶数字检查数
+static long double gBucketSumDigit[kRhoBucketCount] = {};
+static long double gBucketMaxDigit[kRhoBucketCount] = {};
+static long double gBucketSumExpl[kRhoBucketCount] = {};
+static long double gBucketMaxExpl[kRhoBucketCount] = {};
+
+// rho 相对误差分档：[0,0.5%) [0.5,1%) [1,2%) [2,4%) [4,8%) [8,16%) [16,32%) [32%,∞)
+static int rhoBucket(long double r) {
+    if (r < 0.005L) return 0;
+    if (r < 0.01L) return 1;
+    if (r < 0.02L) return 2;
+    if (r < 0.04L) return 3;
+    if (r < 0.08L) return 4;
+    if (r < 0.16L) return 5;
+    if (r < 0.32L) return 6;
+    return 7;
 }
 
 struct Counts {
@@ -150,6 +173,44 @@ static void verifyObserved(const ObservedBoard& board) {
             }
             ++gCells;
         }
+
+    // Approx 对照：按 rho 初始相对误差分桶填误差统计（无固定容差断言）。
+    {
+        const Approx::Result ar = Approx::Analyzer::analyze(board, basic, structure, pool);
+        for (int x = 1; x <= board.rows; ++x)
+            for (int y = 1; y <= board.cols; ++y) {
+                if (board.board[x][y] != Cell::Hidden) continue;
+                const CellId c = board.id(x, y);
+                const auto ra = Approx::observe(board, basic, structure, pool, ar, c);
+                const Counts& ct = counts[static_cast<std::size_t>(c)];
+                if (ct.total == 0) continue;
+                char buf[160];
+                // rho 初始误差：近似爆炸（= rho 测度下的雷概率）相对精确的偏差
+                const ld exactE = static_cast<ld>(ct.explosion) / ct.total;
+                const ld rhoRel =
+                    exactE > 1e-12L ? std::abs(ra.explosion - exactE) / exactE
+                                    : std::abs(ra.explosion - exactE);
+                const int b = rhoBucket(rhoRel);
+                ++gBucketCells[static_cast<std::size_t>(b)];
+                const ld eErr = std::abs(ra.explosion - exactE);
+                gBucketSumExpl[static_cast<std::size_t>(b)] += eErr;
+                gBucketMaxExpl[static_cast<std::size_t>(b)] =
+                    (std::max)(gBucketMaxExpl[static_cast<std::size_t>(b)], eErr);
+                for (int k = 0; k <= 8; ++k) {
+                    const ld dd = std::abs(ra.digit[static_cast<std::size_t>(k)] -
+                                           static_cast<ld>(ct.digit[static_cast<std::size_t>(k)]) /
+                                               ct.total);
+                    gBucketSumDigit[static_cast<std::size_t>(b)] += dd;
+                    gBucketMaxDigit[static_cast<std::size_t>(b)] =
+                        (std::max)(gBucketMaxDigit[static_cast<std::size_t>(b)], dd);
+                    ++gBucketChecks[static_cast<std::size_t>(b)];
+                }
+                std::snprintf(buf, sizeof buf, "A(%d,%d) Σdigit+explosion=1", x, y);
+                ld asum = ra.explosion;
+                for (int k = 0; k <= 8; ++k) asum += ra.digit[static_cast<std::size_t>(k)];
+                check(std::abs(asum - 1.0L) < 1e-9L, buf);
+            }
+    }
 }
 
 int main() {
@@ -283,12 +344,14 @@ int main() {
                     });
                 Distribution::DistPool pool;
                 const Probability::Result prob = Exact::analyze(board, basic, structure, pool);
+                const Approx::Result ar = Approx::Analyzer::analyze(board, basic, structure, pool);
                 for (int x = 1; x <= board.rows; ++x)
                     for (int y = 1; y <= board.cols; ++y) {
                         if (board.board[x][y] != Cell::Hidden) continue;
                         cover(board, basic, structure, x, y);
                         const CellId c = board.id(x, y);
                         const auto r = Exact::observe(board, basic, structure, prob, pool, c);
+                        const auto ra = Approx::observe(board, basic, structure, pool, ar, c);
                         const Counts& ct = counts[static_cast<std::size_t>(c)];
                         char buf[160];
                         std::snprintf(buf, sizeof buf, "g t%02d s%02d (%d,%d) explosion", trial,
@@ -302,6 +365,26 @@ int main() {
                                            static_cast<ld>(ct.digit[static_cast<std::size_t>(k)]) /
                                                ct.total) < 1e-9L, buf);
                         }
+                        // Approx 分桶填充
+                        const ld exactE = static_cast<ld>(ct.explosion) / ct.total;
+                        const ld rhoRel =
+                            exactE > 1e-12L ? std::abs(ra.explosion - exactE) / exactE
+                                            : std::abs(ra.explosion - exactE);
+                        const int b = rhoBucket(rhoRel);
+                        ++gBucketCells[static_cast<std::size_t>(b)];
+                        const ld eErr = std::abs(ra.explosion - exactE);
+                        gBucketSumExpl[static_cast<std::size_t>(b)] += eErr;
+                        gBucketMaxExpl[static_cast<std::size_t>(b)] =
+                            (std::max)(gBucketMaxExpl[static_cast<std::size_t>(b)], eErr);
+                        for (int k = 0; k <= 8; ++k) {
+                            const ld dd = std::abs(ra.digit[static_cast<std::size_t>(k)] -
+                                                   static_cast<ld>(ct.digit[static_cast<std::size_t>(k)]) /
+                                                       ct.total);
+                            gBucketSumDigit[static_cast<std::size_t>(b)] += dd;
+                            gBucketMaxDigit[static_cast<std::size_t>(b)] =
+                                (std::max)(gBucketMaxDigit[static_cast<std::size_t>(b)], dd);
+                            ++gBucketChecks[static_cast<std::size_t>(b)];
+                        }
                         ++gCells;
                     }
                 std::vector<std::pair<int, int>> cand;
@@ -314,6 +397,26 @@ int main() {
                 gc.reveal(x, y);
             }
         }
+    }
+
+    std::printf("\nApprox 误差分桶（按 rho 初始相对误差分档）:\n");
+    std::printf("  rho误差档      格数   数字误差(平均/最大)  爆炸误差(平均/最大)\n");
+    static const char* kRhoBuckets[kRhoBucketCount] = {
+        "[0,0.5%) ", "[0.5,1%)", "[1,2%)  ", "[2,4%)  ",
+        "[4,8%)  ", "[8,16%) ", "[16,32%)", "[32%,∞) "};
+    for (int b = 0; b < kRhoBucketCount; ++b) {
+        const ld avgD = gBucketChecks[static_cast<std::size_t>(b)]
+                            ? gBucketSumDigit[static_cast<std::size_t>(b)] /
+                                  static_cast<ld>(gBucketChecks[static_cast<std::size_t>(b)])
+                            : 0.0L;
+        const ld avgE = gBucketCells[static_cast<std::size_t>(b)]
+                            ? gBucketSumExpl[static_cast<std::size_t>(b)] /
+                                  static_cast<ld>(gBucketCells[static_cast<std::size_t>(b)])
+                            : 0.0L;
+        std::printf("  %s %5lld   %.4f / %.4f     %.4f / %.4f\n", kRhoBuckets[b],
+                    gBucketCells[static_cast<std::size_t>(b)], (double)avgD,
+                    (double)gBucketMaxDigit[static_cast<std::size_t>(b)], (double)avgE,
+                    (double)gBucketMaxExpl[static_cast<std::size_t>(b)]);
     }
 
     std::printf("核对 %lld 格；共 %lld 项检查，失败 %d 项\n", gCells, gCheck, gFail);

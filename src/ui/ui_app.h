@@ -334,33 +334,67 @@ private:
             stateLine = "未翻开";
         lines.push_back("状态: " + stateLine);
 
+        using Engine = GameController::Analysis::Engine;
+        const bool approxEngine = (game_->analysis().engine() == Engine::Approx);
         long double p = Interactive::mineProbability(game_->analysis(), x, y);
         std::ostringstream ps;
-        ps << std::setprecision(10) << "雷概率: " << static_cast<double>(p) << "  ("
-           << std::fixed << std::setprecision(2) << static_cast<double>(p * 100) << "%)";
+        ps << std::setprecision(5) << (approxEngine ? "近似雷概率" : "雷概率") << ": "
+           << static_cast<double>(p) << "  (" << static_cast<double>(p * 100) << "%)";
         lines.push_back(ps.str());
 
+        // 点开结果分布（observe）：爆炸 + 各数字概率（仅未翻开格有意义）。
+        // 近似引擎下每行追加 (精确差 D%)：D = 近似 − 精确（百分点）。
+        // 全部数字保留五位有效数字（有效数字，不是小数点后）。
+        if (!gi.revealed[x][y]) {
+            const Probability::ObserveResult obr = Interactive::observe(game_->analysis(), x, y);
+            const Probability::ObserveResult eobr =
+                approxEngine ? Interactive::exactObserve(game_->analysis(), x, y)
+                             : Probability::ObserveResult{};
+            auto fmtPct = [](long double v) {
+                std::ostringstream os;
+                os << std::setprecision(5) << static_cast<double>(v * 100.0L) << '%';
+                return os.str();
+            };
+            auto fmtDiff = [](long double a, long double b) {
+                std::ostringstream os;
+                os << std::setprecision(5) << std::showpos
+                   << static_cast<double>((std::abs(a - b) < 1e-9L ? 0.0L : (a - b)) * 100.0L)
+                   << '%' << std::noshowpos;
+                return os.str();
+            };
+            if (approxEngine) {
+                lines.push_back("点开: 爆炸 " + fmtPct(obr.explosion) + " (精确差 " +
+                                fmtDiff(obr.explosion, eobr.explosion) + ")");
+            } else {
+                lines.push_back("点开: 爆炸 " + fmtPct(obr.explosion));
+            }
+            for (int k = 0; k <= 8; ++k) {
+                std::string line = "数字 " + std::to_string(k) + ": " + fmtPct(obr.digit[k]);
+                if (approxEngine)
+                    line += " (精确差 " + fmtDiff(obr.digit[k], eobr.digit[k]) + ")";
+                lines.push_back(line);
+            }
+        }
+
         // 近似引擎下，额外用精确引擎全量重算一遍做对比（UI 层，每次访问现算）。
-        using Engine = GameController::Analysis::Engine;
-        if (game_->analysis().engine() == Engine::Approx) {
+        if (approxEngine) {
             const auto& an = game_->analysis();
             const long double ep = Interactive::exactMineProbability(an, x, y);
             const long double diff = (p - ep) * 100.0L;
             std::ostringstream eps;
-            eps << std::setprecision(10) << "精确对比: " << static_cast<double>(ep)
-                << "  (" << std::fixed << std::setprecision(2)
-                << static_cast<double>(ep * 100) << "%, "
-                << std::showpos << static_cast<double>(diff) << "%"
-                << std::noshowpos << ")";
+            eps << std::setprecision(5) << "精确对比: " << static_cast<double>(ep)
+                << "  (" << static_cast<double>(ep * 100) << "%, "
+                << std::showpos
+                << static_cast<double>((std::abs(diff) < 1e-9L ? 0.0L : diff))
+                << "%" << std::noshowpos << ")";
             lines.push_back(eps.str());
         }
 
         std::ostringstream cs;
-        cs << std::setprecision(10)
-           << "候选方案数: " << formatCount(Interactive::candidates(game_->analysis()));
+        cs << "候选方案数: " << formatCount(Interactive::candidates(game_->analysis()));
         lines.push_back(cs.str());
         std::ostringstream tp;
-        tp << std::setprecision(6)
+        tp << std::setprecision(5)
            << "非前沿雷概率: " << static_cast<double>(Interactive::tCellProbability(game_->analysis()));
         lines.push_back(tp.str());
         lines.push_back("计算耗时: " + std::to_string(computedMs_) + " ms");
