@@ -343,7 +343,8 @@ private:
         lines.push_back(ps.str());
 
         // 点开结果分布（observe）：爆炸 + 各数字概率（仅未翻开格有意义）。
-        // 近似引擎下每行追加 (精确差 D%)：D = 近似 − 精确（百分点）。
+        // 近似引擎下每行追加相对差 D% = (近似 − 精确)/精确（以精确为基准；
+        // 精确为零时近似也零 → +0%，否则无定义 → +∞）。
         // 全部数字保留五位有效数字（有效数字，不是小数点后）。
         if (!gi.revealed[x][y]) {
             const Probability::ObserveResult obr = Interactive::observe(game_->analysis(), x, y);
@@ -357,13 +358,22 @@ private:
             };
             auto fmtDiff = [](long double a, long double b) {
                 std::ostringstream os;
+                if (std::abs(a - b) < 1e-9L) {
+                    os << std::setprecision(5) << std::showpos << 0.0L << '%'
+                       << std::noshowpos;
+                    return os.str();
+                }
+                if (std::abs(b) < 1e-9L) {
+                    // 精确为零且近似非零：相对差无定义 → +∞
+                    os << "+∞";
+                    return os.str();
+                }
                 os << std::setprecision(5) << std::showpos
-                   << static_cast<double>((std::abs(a - b) < 1e-9L ? 0.0L : (a - b)) * 100.0L)
-                   << '%' << std::noshowpos;
+                   << static_cast<double>((a - b) / b * 100.0L) << '%' << std::noshowpos;
                 return os.str();
             };
             if (approxEngine) {
-                lines.push_back("点开: 爆炸 " + fmtPct(obr.explosion) + " (精确差 " +
+                lines.push_back("点开: 爆炸 " + fmtPct(obr.explosion) + " (" +
                                 fmtDiff(obr.explosion, eobr.explosion) + ")");
             } else {
                 lines.push_back("点开: 爆炸 " + fmtPct(obr.explosion));
@@ -371,22 +381,29 @@ private:
             for (int k = 0; k <= 8; ++k) {
                 std::string line = "数字 " + std::to_string(k) + ": " + fmtPct(obr.digit[k]);
                 if (approxEngine)
-                    line += " (精确差 " + fmtDiff(obr.digit[k], eobr.digit[k]) + ")";
+                    line += " (" + fmtDiff(obr.digit[k], eobr.digit[k]) + ")";
                 lines.push_back(line);
             }
         }
 
         // 近似引擎下，额外用精确引擎全量重算一遍做对比（UI 层，每次访问现算）。
+        // 差值用相对差（以精确为基准；精确为零时近似也零 → +0%，否则 → +∞）。
         if (approxEngine) {
             const auto& an = game_->analysis();
             const long double ep = Interactive::exactMineProbability(an, x, y);
-            const long double diff = (p - ep) * 100.0L;
             std::ostringstream eps;
             eps << std::setprecision(5) << "精确对比: " << static_cast<double>(ep)
-                << "  (" << static_cast<double>(ep * 100) << "%, "
-                << std::showpos
-                << static_cast<double>((std::abs(diff) < 1e-9L ? 0.0L : diff))
-                << "%" << std::noshowpos << ")";
+                << "  (" << static_cast<double>(ep * 100) << "%, ";
+            if (std::abs(p - ep) < 1e-9L) {
+                eps << std::showpos << 0.0L << "%" << std::noshowpos;
+            } else if (std::abs(ep) < 1e-9L) {
+                eps << "+∞";
+            } else {
+                eps << std::showpos
+                    << static_cast<double>((p - ep) / ep * 100.0L) << "%"
+                    << std::noshowpos;
+            }
+            eps << ")";
             lines.push_back(eps.str());
         }
 
