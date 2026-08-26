@@ -481,12 +481,32 @@ inline Structure::Delta Structure::Updater::update(const ObservedBoard& state,
 // 完全等价：降序删 removed（swap-pop + cellLoc 重映射）、按序追加 addedData。
 // 前置：result 必须是产生该 Delta 时的那份状态（从根沿路径应用即满足）。
 inline void Structure::Updater::applyDelta(Result& result, const Delta& delta) {
-    for (auto it = delta.removed.rbegin(); it != delta.removed.rend(); ++it) {
-        const ComponentId cid = *it;
+    // 删除顺序必须与 update 的 step2.5 一致：按组件 id 降序。
+    // delta.removed 是脏格遭遇顺序，不保证升序；这里用计数排序
+    // （flag 数组 + 降序扫描）等价于 update 的顺序。顺序错了 swap-pop
+    // 会把"最后一个组件"挪进已删槽位、写越界，留下脏 cellLoc。
+    static thread_local std::vector<char> tlFlag;
+    const ComponentId n = static_cast<ComponentId>(result.components.size());
+    if (tlFlag.size() < static_cast<std::size_t>(n))
+        tlFlag.assign(static_cast<std::size_t>(n), 0);
+    else
+        std::fill(tlFlag.begin(), tlFlag.begin() + n, 0);
+    for (ComponentId c : delta.removed) tlFlag[static_cast<std::size_t>(c)] = 1;
+    for (ComponentId cid = n - 1; cid >= 0; --cid) {
+        if (!tlFlag[static_cast<std::size_t>(cid)]) continue;
+        // 先清被删组件的 cellLoc（与 update 的 clearCellLoc 对齐）：否则重放后
+        // 这些格子仍指向已删除/已挪走的组件，observe 会读到脏归属。
+        const Instance& victim = result.components[static_cast<std::size_t>(cid)];
+        for (std::size_t b = 0; b < victim.boxes.count(); ++b)
+            for (std::size_t k = victim.boxes.boxOf[b]; k < victim.boxes.boxOf[b + 1]; ++k)
+                result.cellLoc[static_cast<std::size_t>(victim.boxes.cells[k])] = CellLocation{};
+        for (CellId c : victim.constraintCells)
+            result.cellLoc[static_cast<std::size_t>(c)] = CellLocation{};
         const ComponentId last = static_cast<ComponentId>(result.components.size()) - 1;
         if (cid != last) {
             result.components[static_cast<std::size_t>(cid)] =
                 std::move(result.components[static_cast<std::size_t>(last)]);
+            // 重映射被移动组件的 cellLoc。
             const Instance& moved = result.components[static_cast<std::size_t>(cid)];
             for (std::size_t b = 0; b < moved.boxes.count(); ++b)
                 for (std::size_t k = moved.boxes.boxOf[b]; k < moved.boxes.boxOf[b + 1]; ++k)

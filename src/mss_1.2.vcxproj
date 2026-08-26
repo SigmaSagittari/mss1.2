@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -148,6 +148,7 @@
     <ClCompile Include="mss_1.2.cpp" />
     <ClCompile Include="test\observe_brute_test.cpp" />
     <ClCompile Include="test\observe_exact_test.cpp" />
+    <ClCompile Include="test\search_timing_test.cpp" />
     <ClCompile Include="test\struct_perf_test.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -157,6 +158,7 @@
     <ClInclude Include="analysis\probability.h" />
     <ClInclude Include="analysis\probability\exact.h" />
     <ClInclude Include="analysis\rational.h" />
+    <ClInclude Include="analysis\search\midgame_search.h" />
     <ClInclude Include="analysis\structure.h" />
     <ClInclude Include="core\assert.h" />
     <ClInclude Include="core\config.h" />
@@ -181,3 +183,4 @@
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
 </Project>
+

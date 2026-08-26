@@ -76,7 +76,7 @@ private:
         if (p == "/api/detail") return jsonDetail(req);
         if (p == "/api/analyzer" && req.method == "POST") return jsonAnalyzer(req);
         if (p == "/api/edit" && req.method == "POST") return jsonEdit(req);
-        if (p == "/api/analyze" && req.method == "POST") return jsonAnalyze();
+        if (p == "/api/analyze" && req.method == "POST") return jsonAnalyze(req);
         if (p == "/api/config") {
             if (req.method == "POST") return jsonConfig(req);
             return jsonConfigGet();
@@ -415,25 +415,59 @@ private:
         return os.str();
     }
 
-    HttpResponse jsonAnalyze() {
-        const Interactive::AnalyzeResult r =
-            Interactive::analyze(game_->analysis().state());
-        if (!r.valid)
-            return json("{\"valid\":false,\"reason\":" + jsonString(r.reason) + "}");
-        if (!r.bruteforce)
-            return json("{\"valid\":true,\"bruteforce\":false,\"candidates\":\"" +
-                        formatCount(r.candidates) + "\",\"reason\":" + jsonString(r.reason) +
-                        gridJson(r.grid, r.tProb) + "}");
-
+    HttpResponse jsonAnalyze(const HttpRequest& req) {
+        const ObservedBoard& state = game_->analysis().state();
+        // anytime 会话：盘面没变就继续生长，变了才重建。
+        if (!search_ || !MidgameSearch::matches(*search_, state)) {
+            search_ = std::make_unique<MidgameSearch::Session>();
+            MidgameSearch::build(*search_, state);
+        }
+        const MidgameSearch::Session& s = *search_;
+        if (!s.valid)
+            return json("{\"valid\":false,\"reason\":" + jsonString(s.reason) + "}");
+        const Grid<long double> grid = Interactive::materializeProbability(s);
+        const long double tProb = s.prob.tCellProbability;
+        if (s.prob.candidates <= static_cast<long double>(kMaxBruteforceCount)) {
+            const auto t0 = std::chrono::steady_clock::now();
+            const EndgameBruteforce::Result r = EndgameBruteforce::solveEndgame(
+                s.board, s.basic, s.structure, search_->pool, grid);
+            const auto t1 = std::chrono::steady_clock::now();
+            const long long ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+            const auto& mv = r.result[0];
+            const int total = r.totalPossibilities;
+            const double winRate =
+                total > 0 ? static_cast<double>(mv.wins) / total * 100.0 : 0.0;
+            std::ostringstream os;
+            os << std::setprecision(6);
+            os << "{\"valid\":true,\"bruteforce\":true"
+               << ",\"candidates\":\"" << formatCount(s.prob.candidates) << "\""
+               << ",\"total\":" << total
+               << ",\"firstMove\":[" << mv.x << "," << mv.y << "]"
+               << ",\"wins\":" << mv.wins << ",\"winRate\":" << winRate
+               << ",\"nodes\":" << r.nodes << ",\"ms\":" << ms
+               << gridJson(grid, tProb) << "}";
+            return json(os.str());
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        // UI 可按上次实测耗时自适应给预算（默认 = 配置值）。
+        const int budget = bodyInt(req.body, "budget");
+        MidgameSearch::grow(*search_, budget > 0 ? budget : search_->config.nodeBudget);
+        const auto t1 = std::chrono::steady_clock::now();
+        const long long ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+        const MidgameSearch::Answer ans = MidgameSearch::getAnswer(search_->tree);
         std::ostringstream os;
         os << std::setprecision(6);
-        os << "{\"valid\":true,\"bruteforce\":true"
-           << ",\"candidates\":\"" << formatCount(r.candidates) << "\""
-           << ",\"total\":" << r.total
-           << ",\"firstMove\":[" << r.firstX << "," << r.firstY << "]"
-           << ",\"wins\":" << r.wins << ",\"winRate\":" << r.winRate
-           << ",\"nodes\":" << r.nodes << ",\"ms\":" << r.ms
-           << gridJson(r.grid, r.tProb) << "}";
+        os << "{\"valid\":true,\"midgame\":true"
+           << ",\"candidates\":\"" << formatCount(s.prob.candidates) << "\""
+           << ",\"firstMove\":[" << ans.x << "," << ans.y << "]"
+           << ",\"searchDepth\":" << ans.depth
+           << ",\"searchNodes\":" << ans.nodes
+           << ",\"searchObserves\":" << ans.observes
+           << ",\"value\":" << static_cast<double>(ans.value)
+           << ",\"ms\":" << ms
+           << gridJson(grid, tProb) << "}";
         return json(os.str());
     }
 
@@ -456,6 +490,7 @@ private:
     HttpServer server_;
     std::unique_ptr<GameController> game_;
     std::unique_ptr<ObservedBoard> editSaved_;  // 分析模式进入时的盘面快照（退出还原）
+    std::unique_ptr<MidgameSearch::Session> search_;  // anytime 中盘搜索会话（盘面变了自动重建）
     bool analyzerActive_ = false;
     int port_ = 18080;
     int computedMs_ = 0;

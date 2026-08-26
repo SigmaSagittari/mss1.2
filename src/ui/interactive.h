@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <chrono>
 #include <string>
@@ -9,6 +9,7 @@
 #include "analysis/probability.h"
 #include "analysis/probability/exact.h"
 #include "analysis/rational.h"
+#include "analysis/search/midgame_search.h"
 #include "analysis/structure.h"
 #include "core/config.h"
 #include "core/types.h"
@@ -16,58 +17,41 @@
 
 namespace mss {
 
-// ─────────────────────────────────────────────────────────────
-// interactive.h — 分析/游戏数据 → UI 可消费表示的翻译层（垃圾桶）。
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// interactive.h 鈥?鍒嗘瀽/娓告垙鏁版嵁 鈫?UI 鍙秷璐硅〃绀虹殑缈昏瘧灞傦紙鍨冨溇妗讹級銆?
 //
-// 各种"计算小垃圾"都扔这里：引擎无关的概率查询、整盘物化、精确对比、
-// 全局分析（合法性 + 候选数 + 暴力枚举）等。ui_app 只负责路由/JSON，
-// GameController 只负责游戏规则（翻开/泛洪/标旗/胜负）。本层不含游戏
-// 规则或 HTTP 逻辑，全是纯计算。
-// ─────────────────────────────────────────────────────────────
+// 鍚勭"璁＄畻灏忓瀮鍦?閮芥墧杩欓噷锛氬紩鎿庢棤鍏崇殑姒傜巼鏌ヨ銆佹暣鐩樼墿鍖栥€佺簿纭姣斻€?
+// 鍏ㄥ眬鍒嗘瀽锛堝悎娉曟€?+ 鍊欓€夋暟 + 鏆村姏鏋氫妇锛夌瓑銆倁i_app 鍙礋璐ｈ矾鐢?JSON锛?
+// GameController 鍙礋璐ｆ父鎴忚鍒欙紙缈诲紑/娉涙椽/鏍囨棗/鑳滆礋锛夈€傛湰灞備笉鍚父鎴?
+// 瑙勫垯鎴?HTTP 閫昏緫锛屽叏鏄函璁＄畻銆?
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 namespace Interactive {
 
-// ── 引擎无关查询（基于当前 Analysis 管线）──
+// 鈹€鈹€ 寮曟搸鏃犲叧鏌ヨ锛堝熀浜庡綋鍓?Analysis 绠＄嚎锛夆攢鈹€
 
-// 单格雷概率（Mine→1，Unknown→tProb/rho，Safe→0，前沿格→boxProbs）。
-// 非 const：RhoRational 惰性记忆化会就地补缓存（幂等，不影响结果）。
+// 鍗曟牸闆锋鐜囷紙Mine鈫?锛孶nknown鈫抰Prob/rho锛孲afe鈫?锛屽墠娌挎牸鈫抌oxProbs锛夈€?
+// 闈?const锛歊hoRational 鎯版€ц蹇嗗寲浼氬氨鍦拌ˉ缂撳瓨锛堝箓绛夛紝涓嶅奖鍝嶇粨鏋滐級銆?
 inline long double mineProbability(GameController::Analysis& an, int x, int y);
 
-// 候选方案数。
+// 鍊欓€夋柟妗堟暟銆?
 inline long double candidates(const GameController::Analysis& an);
 
-// 非前沿（Unknown）格雷密度。
+// 闈炲墠娌匡紙Unknown锛夋牸闆峰瘑搴︺€?
 inline long double tCellProbability(const GameController::Analysis& an);
 
-// 整盘概率网格物化（1-based，与棋盘一致）。逐格查询，O(rows*cols)。
+// 鏁寸洏姒傜巼缃戞牸鐗╁寲锛?-based锛屼笌妫嬬洏涓€鑷达級銆傞€愭牸鏌ヨ锛孫(rows*cols)銆?
 inline Grid<long double> materializeProbability(GameController::Analysis& an);
 
-// 点开某格的结果分布（explosion + digit[0..8]），详情面板查询。
+// 鐐瑰紑鏌愭牸鐨勭粨鏋滃垎甯冿紙explosion + digit[0..8]锛夛紝璇︽儏闈㈡澘鏌ヨ銆?
 inline Probability::ObserveResult observe(GameController::Analysis& an, int x, int y);
 
-// ── 全局分析（编辑后的盘面全量重构）──
+// 鈹€鈹€ 涓洏鎼滅储浼氳瘽宸ュ叿 鈹€鈹€
 
-// 一次全局分析的结果。
-struct AnalyzeResult {
-    bool valid = false;          // 盘面合法（basic + 各连通块分布）
-    std::string reason;          // 不合法 / 不暴力的原因说明
-    bool bruteforce = false;     // 候选数低于阈值、已执行暴力枚举
-    long double candidates = 0;  // 候选方案数（含 T 格组合）
-    long double tProb = 0;       // 非前沿雷概率
-    Grid<long double> grid;      // 物化概率网格（1-based，与 board 同尺寸）
-    int total = 0;               // 暴力方案总数
-    int firstX = 0, firstY = 0;  // 最优首招（1-based）
-    int wins = 0;                // 可保证赢下的方案数
-    double winRate = 0;          // 胜率 %
-    long long nodes = 0;         // DFS 节点数
-    long long ms = 0;            // 暴力耗时
-};
+// 浠庝細璇濈墿鍖栨鐜囩綉鏍硷紙1-based锛屼笌妫嬬洏涓€鑷达級銆?
+inline Grid<long double> materializeProbability(const MidgameSearch::Session& s);
 
-// 对（可能被编辑过的）盘面做全局分析：全量重构 basic/structure/probability，
-// 合法性检查 → 候选数 → 低于暴力阈值则残局求解。
-inline AnalyzeResult analyze(const ObservedBoard& board);
-
-// ── 实现区 ──
+// 鈹€鈹€ 瀹炵幇鍖?鈹€鈹€
 
 inline long double mineProbability(GameController::Analysis& an, int x, int y) {
     return an.probability().mineProbability(an.state().id(x, y), an.state(),
@@ -98,100 +82,13 @@ inline Probability::ObserveResult observe(GameController::Analysis& an, int x, i
                           state.id(x, y));
 }
 
-inline AnalyzeResult analyze(const ObservedBoard& state) {
-    AnalyzeResult out;
-
-    // 编辑后每次点「开始分析」全量重构。
-    const Basic::Result basic = Basic::Analyzer::analyze(state);
-    Structure::ShapePool shapes;
-    const Structure::Result structure = Structure::Analyzer::analyze(state, basic, shapes);
-    Distribution::DistPool dists;
-
-    // 合法性 1：basic 矛盾（数字约束无解）。
-    if (!basic.valid) {
-        out.reason = "盘面矛盾（basic 无解）";
-        return out;
-    }
-    out.valid = true;
-
-    // 合法性 2：每个连通块的分布非空（无可行摆法 = 结构矛盾）。
-    // 顺带累计全部连通块的可行雷数范围 [minHeavy, maxHeavy]。
-    int minHeavy = 0, maxHeavy = 0;
-    for (ComponentId cid = 0; cid < static_cast<ComponentId>(structure.components.size());
-         ++cid) {
-        const Structure::Instance& inst =
-            structure.components[static_cast<std::size_t>(cid)];
-        const Distribution* dist = Distribution::Solver::analyze(*inst.shape, dists);
-        if (dist->entries.empty()) {
-            out.valid = false;
-            out.reason = "连通块无可行摆法（矛盾）";
-            return out;
-        }
-        minHeavy += dist->entries[0].mineCount;
-        maxHeavy += dist->entries.back().mineCount;
-    }
-
-    // 合法性 3：剩余自由雷数必须落在全局可行范围里——
-    //   所有连通块最低摆法雷数之和 ≤ M ≤ 最高摆法之和 + T 格数（每格至多 1 雷）。
-    // 否则全局雷数无解（如四角 3 需要 12 雷 > 盘面 10 雷）：
-    // 不在多项式之前拦下，denominator 归零会让概率网格全是 NaN。
-    const int M = state.totalMines - basic.mineSum;
-    if (basic.mineSum > state.totalMines) {
-        out.valid = false;
-        out.reason = "已定雷数（" + std::to_string(basic.mineSum) + "）超过盘面总雷数（" +
-                     std::to_string(state.totalMines) + "），盘面矛盾";
-        return out;
-    }
-    if (M < minHeavy) {
-        out.valid = false;
-        out.reason = "全局雷数不足（连通块至少需要 " + std::to_string(minHeavy) +
-                     " 雷，只剩 " + std::to_string(M) + " 可用）";
-        return out;
-    }
-    if (M > maxHeavy + basic.unknownSum) {
-        out.valid = false;
-        out.reason = "全局雷数过多（连通块至多容纳 " + std::to_string(maxHeavy) +
-                     " 雷 + " + std::to_string(basic.unknownSum) + " 未知格，共 " +
-                     std::to_string(M) + " 雷无处安放）";
-        return out;
-    }
-
-    // 候选数（精确）：含 T 格组合，= all_distribute 会产出的总方案数。
-    const Probability::Result prob = Exact::analyze(state, basic, structure, dists);
-    out.candidates = prob.candidates;
-    out.tProb = prob.tCellProbability;
-
-    // 物化概率网格（用刚算的 Exact 结果，保证与候选数同源）。
-    out.grid = Grid<long double>(state.rows, state.cols, 0.0L);
-    for (int i = 1; i <= state.rows; ++i)
-        for (int j = 1; j <= state.cols; ++j)
-            out.grid[i][j] = prob.mineProbability(state.id(i, j), state, basic, structure);
-
-    // 超过暴力枚举阈值：暂不处理，之后用中盘分析补上（概率网格仍给出）。
-    if (out.candidates > static_cast<long double>(kMaxBruteforceCount)) {
-        out.bruteforce = false;
-        out.reason = "候选方案数超过暴力阈值，中盘分析待实现";
-        return out;
-    }
-
-    // 开始暴力：残局求解。
-    out.bruteforce = true;
-    const auto t0 = std::chrono::steady_clock::now();
-    const EndgameBruteforce::Result r =
-        EndgameBruteforce::solveEndgame(state, basic, structure, dists, out.grid);
-    const auto t1 = std::chrono::steady_clock::now();
-    out.ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-
-    out.total = r.totalPossibilities;
-    const auto& mv = r.result[0];
-    out.firstX = mv.x;
-    out.firstY = mv.y;
-    out.wins = mv.wins;
-    out.nodes = r.nodes;
-    out.winRate = r.totalPossibilities > 0
-                      ? static_cast<double>(mv.wins) / r.totalPossibilities * 100.0
-                      : 0.0;
-    return out;
+inline Grid<long double> materializeProbability(const MidgameSearch::Session& s) {
+    Grid<long double> grid(s.board.rows, s.board.cols, 0.0L);
+    for (int x = 1; x <= s.board.rows; ++x)
+        for (int y = 1; y <= s.board.cols; ++y)
+            grid[x][y] =
+                s.prob.mineProbability(s.board.id(x, y), s.board, s.basic, s.structure);
+    return grid;
 }
 
 }  // namespace Interactive
