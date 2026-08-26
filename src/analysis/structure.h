@@ -251,34 +251,29 @@ inline Structure::Instance Structure::buildComponent(
     const int cols = state.cols;
 
     // 线程局部复用工作区（无重入）：避免每块重建的临时向量分配。
-    static thread_local std::vector<U128> tlHashList;
+    static thread_local FlatHashTable<U128, BoxId, U128Hash> tlHashBox;
     static thread_local std::vector<int> tlHashUsed;
     static thread_local std::vector<BoxId> tlBoxOfCells;
     static thread_local std::vector<std::vector<CellId>> tlBuckets;
     static thread_local std::vector<char> tlBoxUsed;
+    tlHashBox.clear();  // 保留容量，只清占位
 
-    // 1. 收集所有不同的哈希值 → 单位格（哈希相同 = 同一单位格）。
-    tlHashList.clear();
-    tlHashList.reserve(cells.size());
-    for (auto [x, y] : cells) tlHashList.push_back(cellHash[x][y]);
-    std::sort(tlHashList.begin(), tlHashList.end());
-    tlHashList.erase(std::unique(tlHashList.begin(), tlHashList.end()), tlHashList.end());
-
-    tlHashUsed.assign(tlHashList.size(), -1);
+    // 1. 收集单位格：哈希相同 = 同一单位格（哈希表替代 sort+unique+lower_bound，O(C) 均摊）。
     tlBoxOfCells.assign(cells.size(), static_cast<BoxId>(-1));
     Shape shape;
 
     for (std::size_t ci = 0; ci < cells.size(); ++ci) {
         const auto [x, y] = cells[ci];
         if (basic.marks[x][y] != Mark::Frontier) continue;
-        const int hv = static_cast<int>(
-            std::lower_bound(tlHashList.begin(), tlHashList.end(), cellHash[x][y]) -
-            tlHashList.begin());
-        if (tlHashUsed[static_cast<std::size_t>(hv)] == -1) {
-            tlHashUsed[static_cast<std::size_t>(hv)] = static_cast<int>(shape.boxes.size());
+        const U128 h = cellHash[x][y];
+        BoxId boxId;
+        if (const BoxId* found = tlHashBox.find(h)) {
+            boxId = *found;
+        } else {
+            boxId = static_cast<BoxId>(shape.boxes.size());
             shape.boxes.push_back({0});
+            tlHashBox.emplace(h, boxId);
         }
-        const BoxId boxId = static_cast<BoxId>(tlHashUsed[static_cast<std::size_t>(hv)]);
         shape.boxes[static_cast<std::size_t>(boxId)].size++;
         tlBoxOfCells[ci] = boxId;
         // 复用 cellHash：改为保存 格子 → 单位格 id。
