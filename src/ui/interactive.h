@@ -115,6 +115,8 @@ inline AnalyzeResult analyze(const ObservedBoard& state) {
     out.valid = true;
 
     // 合法性 2：每个连通块的分布非空（无可行摆法 = 结构矛盾）。
+    // 顺带累计全部连通块的可行雷数范围 [minHeavy, maxHeavy]。
+    int minHeavy = 0, maxHeavy = 0;
     for (ComponentId cid = 0; cid < static_cast<ComponentId>(structure.components.size());
          ++cid) {
         const Structure::Instance& inst =
@@ -125,6 +127,33 @@ inline AnalyzeResult analyze(const ObservedBoard& state) {
             out.reason = "连通块无可行摆法（矛盾）";
             return out;
         }
+        minHeavy += dist->entries[0].mineCount;
+        maxHeavy += dist->entries.back().mineCount;
+    }
+
+    // 合法性 3：剩余自由雷数必须落在全局可行范围里——
+    //   所有连通块最低摆法雷数之和 ≤ M ≤ 最高摆法之和 + T 格数（每格至多 1 雷）。
+    // 否则全局雷数无解（如四角 3 需要 12 雷 > 盘面 10 雷）：
+    // 不在多项式之前拦下，denominator 归零会让概率网格全是 NaN。
+    const int M = state.totalMines - basic.mineSum;
+    if (basic.mineSum > state.totalMines) {
+        out.valid = false;
+        out.reason = "已定雷数（" + std::to_string(basic.mineSum) + "）超过盘面总雷数（" +
+                     std::to_string(state.totalMines) + "），盘面矛盾";
+        return out;
+    }
+    if (M < minHeavy) {
+        out.valid = false;
+        out.reason = "全局雷数不足（连通块至少需要 " + std::to_string(minHeavy) +
+                     " 雷，只剩 " + std::to_string(M) + " 可用）";
+        return out;
+    }
+    if (M > maxHeavy + basic.unknownSum) {
+        out.valid = false;
+        out.reason = "全局雷数过多（连通块至多容纳 " + std::to_string(maxHeavy) +
+                     " 雷 + " + std::to_string(basic.unknownSum) + " 未知格，共 " +
+                     std::to_string(M) + " 雷无处安放）";
+        return out;
     }
 
     // 候选数（精确）：含 T 格组合，= all_distribute 会产出的总方案数。

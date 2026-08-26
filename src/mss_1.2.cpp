@@ -4,6 +4,6 @@
 void runStructPerfTest();
 
 int main() {
-    runStructPerfTest();
+    //runStructPerfTest();
     return mss::UiApp().run();
 }
