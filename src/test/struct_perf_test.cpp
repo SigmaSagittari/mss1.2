@@ -28,10 +28,10 @@ void runStructPerfTest() {
     std::mt19937 rng(20260826);
     const auto t0 = std::chrono::steady_clock::now();
     long long moves = 0;
+    int wins = 0, losses = 0;
     for (int g = 0; g < 1000; ++g) {
         GameController gc(rows, cols, mines, static_cast<unsigned>(rng()));
-        for (int step = 0; step < 250; ++step) {
-            if (gc.info().status != GameController::Status::Playing) break;
+        while (gc.info().status == GameController::Status::Playing) {
             auto& an = gc.analysis();
             const auto& board = an.state();
             const auto& basic = an.basicMarks();
@@ -48,10 +48,13 @@ void runStructPerfTest() {
             gc.reveal(bx, by);
             ++moves;
         }
+        if (gc.info().status == GameController::Status::Won) ++wins;
+        else if (gc.info().status == GameController::Status::Lost) ++losses;
     }
     const auto t1 = std::chrono::steady_clock::now();
     const double sec = std::chrono::duration<double>(t1 - t0).count();
-    std::printf("1000 局 %lld 步，总耗时 %.2f s，%.1f μs/步\n", moves, sec,
-                sec / static_cast<double>(moves) * 1e6);
+    std::printf("1000 局 %lld 步，总耗时 %.2f s，%.1f μs/步；胜 %d 负 %d 胜率 %.1f%%\n",
+                moves, sec, sec / static_cast<double>(moves) * 1e6, wins, losses,
+                100.0 * static_cast<double>(wins) / 1000.0);
     std::exit(0);
 }
