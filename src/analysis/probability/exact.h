@@ -158,7 +158,7 @@ inline Probability::Result Exact::analyze(const ObservedBoard& board,
     const int M = board.totalMines - basic.mineSum;
     const int tSum = basic.unknownSum;
 
-    // 活组件（跳过墓碑）：收集分布，对齐到 Result.components（下标 = ComponentId）。
+    // 活组件：收集分布，对齐到 Result.components（下标 = ComponentId）。
     Probability::Result result;
     result.components.resize(structure.components.size());
 
@@ -168,7 +168,6 @@ inline Probability::Result Exact::analyze(const ObservedBoard& board,
          ++cid) {
         const Structure::Instance& inst =
             structure.components[static_cast<std::size_t>(cid)];
-        if (!inst.alive) continue;
         aliveIds.push_back(cid);
         // 确保分布存在：计算并缓存（同一 shape 幂等命中）。
         distList.push_back(Distribution::Solver::analyze(*inst.shape, pool));
@@ -407,7 +406,7 @@ inline Probability::ObserveResult Exact::observe(
     for (ComponentId cid = 0; cid < static_cast<ComponentId>(structure.components.size());
          ++cid) {
         const Structure::Instance& inst = structure.components[static_cast<std::size_t>(cid)];
-        if (!inst.alive || seen[static_cast<std::size_t>(cid)]) continue;
+        if (seen[static_cast<std::size_t>(cid)]) continue;
         const Distribution* dist = Distribution::Solver::analyze(*inst.shape, pool);
         pRest = pRest * Polynomial(*dist);
     }

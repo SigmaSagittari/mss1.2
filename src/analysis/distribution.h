@@ -133,19 +133,35 @@ template <typename OnAssignment>
 inline void Distribution::Solver::forEachAssignment(const Structure::Shape& shape,
                                                     OnAssignment&& onAssignment) {
     const int n = static_cast<int>(shape.boxes.size());
+    const int nc = static_cast<int>(shape.constraints.size());
 
     // 线程局部复用工作区（无重入）：避免每次分析的嵌套 vector 分配。
-    static thread_local std::vector<std::vector<int>> tlBoxToLimits;
+    static thread_local std::vector<std::vector<int>> tlBoxLimits;
+    static thread_local std::vector<int> tlConsSum;
+    static thread_local std::vector<int> tlConsMaxAdd;
+    static thread_local std::vector<int> tlCurSum;
+    static thread_local std::vector<int> tlSizeSum;
     static thread_local std::vector<char> tlAssignment;
-    tlBoxToLimits.assign(static_cast<std::size_t>(n), {});
-    for (int i = 0; i < static_cast<int>(shape.constraints.size()); ++i) {
-        int maxBox = 0;
-        for (BoxId boxId : shape.constraints[static_cast<std::size_t>(i)].boxIds)
-            maxBox = std::max(maxBox, static_cast<int>(boxId));
-        tlBoxToLimits[static_cast<std::size_t>(maxBox)].push_back(i);
-    }
+    tlBoxLimits.assign(static_cast<std::size_t>(n), {});
+    tlConsSum.assign(static_cast<std::size_t>(nc), 0);
+    tlConsMaxAdd.assign(static_cast<std::size_t>(nc), 0);
+    tlCurSum.assign(static_cast<std::size_t>(nc), 0);
+    tlSizeSum.assign(static_cast<std::size_t>(nc), 0);
     tlAssignment.assign(static_cast<std::size_t>(n), 0);
 
+    for (int i = 0; i < nc; ++i) {
+        tlConsSum[static_cast<std::size_t>(i)] = shape.constraints[static_cast<std::size_t>(i)].sum;
+        for (BoxId boxId : shape.constraints[static_cast<std::size_t>(i)].boxIds) {
+            tlConsMaxAdd[static_cast<std::size_t>(i)] +=
+                shape.boxes[static_cast<std::size_t>(boxId)].size;
+            tlBoxLimits[static_cast<std::size_t>(boxId)].push_back(i);
+        }
+    }
+
+    // 增量约束剪枝：每个 box 赋值后立即检查其所属约束。
+    //   curSum[c] + k > sum[c]         → 超了，剪
+    //   curSum[c] + k + rem < sum[c]    → 剩余 box 全摆满也凑不够，剪
+    //   （rem = 约束 c 未赋 box 的 size 之和）
     auto dfs = [&](auto&& self, int idx, long double curWays) -> void {
         if (idx == n) {
             onAssignment(tlAssignment, curWays);
@@ -154,18 +170,29 @@ inline void Distribution::Solver::forEachAssignment(const Structure::Shape& shap
         const int maxK = shape.boxes[static_cast<std::size_t>(idx)].size;
         for (int k = 0; k <= maxK; ++k) {
             tlAssignment[static_cast<std::size_t>(idx)] = static_cast<char>(k);
-            const long double newWays = curWays * binom(maxK, k);
             bool ok = true;
-            for (int limitId : tlBoxToLimits[static_cast<std::size_t>(idx)]) {
-                int s = 0;
-                for (BoxId boxId : shape.constraints[static_cast<std::size_t>(limitId)].boxIds)
-                    s += tlAssignment[static_cast<std::size_t>(boxId)];
-                if (s != shape.constraints[static_cast<std::size_t>(limitId)].sum) {
+            for (int c : tlBoxLimits[static_cast<std::size_t>(idx)]) {
+                const int s = tlCurSum[static_cast<std::size_t>(c)] + k;
+                // rem = 约束 c 未赋 box（含当前 idx）的 size 之和
+                const int rem = tlConsMaxAdd[static_cast<std::size_t>(c)] -
+                                (tlSizeSum[static_cast<std::size_t>(c)] + maxK);
+                if (s > tlConsSum[static_cast<std::size_t>(c)] ||
+                    s + rem < tlConsSum[static_cast<std::size_t>(c)]) {
                     ok = false;
                     break;
                 }
             }
-            if (ok) self(self, idx + 1, newWays);
+            if (ok) {
+                for (int c : tlBoxLimits[static_cast<std::size_t>(idx)]) {
+                    tlCurSum[static_cast<std::size_t>(c)] += k;
+                    tlSizeSum[static_cast<std::size_t>(c)] += maxK;
+                }
+                self(self, idx + 1, curWays * binom(maxK, k));
+                for (int c : tlBoxLimits[static_cast<std::size_t>(idx)]) {
+                    tlCurSum[static_cast<std::size_t>(c)] -= k;   // 回溯
+                    tlSizeSum[static_cast<std::size_t>(c)] -= maxK;
+                }
+            }
         }
     };
     dfs(dfs, 0, 1.0);
@@ -249,11 +276,10 @@ inline void Distribution::Solver::all_distribute(const ObservedBoard& board,
         }
     };
 
-    // 活组件索引（跳过墓碑）。
+    // 组件索引。
     std::vector<ComponentId> comps;
     for (ComponentId cid = 0; cid < static_cast<ComponentId>(structure.components.size()); ++cid)
-        if (structure.components[static_cast<std::size_t>(cid)].alive)
-            comps.push_back(cid);
+        comps.push_back(cid);
 
     const int compCount = static_cast<int>(comps.size());
 

@@ -28,7 +28,8 @@ namespace mss {
 //
 // 层间（吃 DAG，非只吃上层 delta）：Analyzer/Updater 直接读
 // board + Basic::Result 当前状态；Updater 就地改 Result 只碰脏块，
-// 返回 Delta 供 undo journal。不做 swap-pop，ComponentId 墓碑式保留。
+// 增量更新：就地修改 result（只碰受影响连通块，无整盘拷贝）。
+    // 返回 Delta 供搜索树增量重放（applyDelta），不做墓碑式保留。
 // ─────────────────────────────────────────────────────────────
 
 struct Structure {
@@ -74,7 +75,6 @@ struct Structure {
         Boxes boxes;                   // 本盘面单位格的格子
         // 约束数字格，顺序与 shape.constraints 一致。
         std::vector<CellId> constraintCells;
-        bool alive = true;  // false = 墓碑：已从结构摘除，数据保留（undo 可恢复）
     };
 
     // structure 段输出：全部连通块实例 + 格子 → 位置映射。
@@ -83,10 +83,14 @@ struct Structure {
         std::vector<CellLocation> cellLoc;  // 按 CellId 索引
     };
 
-    // 一次增量更新的变更集合（供 UndoJournal / UI 增量消费）。
+    // 一次增量更新的变更集合（供搜索树增量重放 / UI 增量消费）。
+    // removed 按 ComponentId 记被删组件（应用时降序 swap-pop 安全）；
+    // added 与 addedData 对齐：added[i] = 真实状态里新增组件的 id，
+    // addedData[i] = 该组件的完整数据（重放态没有别的来源，必须自带）。
     struct Delta {
-        std::vector<ComponentId> removed;  // 被摘除的连通块（墓碑保留，不移动）
-        std::vector<ComponentId> added;    // 新重建的连通块
+        std::vector<ComponentId> removed;
+        std::vector<ComponentId> added;
+        std::vector<Instance> addedData;
     };
 
     // ── 池 ──
@@ -118,6 +122,11 @@ struct Structure {
         static Delta update(const ObservedBoard& board, const Basic::Result& basic,
                             Result& result, ShapePool& pool,
                             const std::vector<Basic::Update>& updates);
+
+        // 把 Delta 应用到另一份 Result（搜索树节点增量重放）：
+        // 从根沿路径逐个应用，或父节点 → 子节点增量到达。
+        // 等价于 update 的结构变更部分，不触碰 board/basic（由调用方保持同步）。
+        static void applyDelta(Result& result, const Delta& delta);
     };
 
     // ── 实现区 ──
@@ -241,51 +250,58 @@ inline Structure::Instance Structure::buildComponent(
     const int rows = state.rows;
     const int cols = state.cols;
 
-    // 1. 收集所有不同的哈希值 → 单位格（哈希相同 = 同一单位格）。
-    std::vector<U128> hashList;
-    hashList.reserve(cells.size());
-    for (auto [x, y] : cells) hashList.push_back(cellHash[x][y]);
-    std::sort(hashList.begin(), hashList.end());
-    hashList.erase(std::unique(hashList.begin(), hashList.end()), hashList.end());
+    // 线程局部复用工作区（无重入）：避免每块重建的临时向量分配。
+    static thread_local std::vector<U128> tlHashList;
+    static thread_local std::vector<int> tlHashUsed;
+    static thread_local std::vector<BoxId> tlBoxOfCells;
+    static thread_local std::vector<std::vector<CellId>> tlBuckets;
+    static thread_local std::vector<char> tlBoxUsed;
 
-    std::vector<int> hashUsed(hashList.size(), -1);
-    std::vector<BoxId> boxOfCells(cells.size(), -1);
+    // 1. 收集所有不同的哈希值 → 单位格（哈希相同 = 同一单位格）。
+    tlHashList.clear();
+    tlHashList.reserve(cells.size());
+    for (auto [x, y] : cells) tlHashList.push_back(cellHash[x][y]);
+    std::sort(tlHashList.begin(), tlHashList.end());
+    tlHashList.erase(std::unique(tlHashList.begin(), tlHashList.end()), tlHashList.end());
+
+    tlHashUsed.assign(tlHashList.size(), -1);
+    tlBoxOfCells.assign(cells.size(), static_cast<BoxId>(-1));
     Shape shape;
 
     for (std::size_t ci = 0; ci < cells.size(); ++ci) {
         const auto [x, y] = cells[ci];
         if (basic.marks[x][y] != Mark::Frontier) continue;
         const int hv = static_cast<int>(
-            std::lower_bound(hashList.begin(), hashList.end(), cellHash[x][y]) -
-            hashList.begin());
-        if (hashUsed[hv] == -1) {
-            hashUsed[hv] = static_cast<int>(shape.boxes.size());
+            std::lower_bound(tlHashList.begin(), tlHashList.end(), cellHash[x][y]) -
+            tlHashList.begin());
+        if (tlHashUsed[static_cast<std::size_t>(hv)] == -1) {
+            tlHashUsed[static_cast<std::size_t>(hv)] = static_cast<int>(shape.boxes.size());
             shape.boxes.push_back({0});
         }
-        const BoxId boxId = static_cast<BoxId>(hashUsed[hv]);
+        const BoxId boxId = static_cast<BoxId>(tlHashUsed[static_cast<std::size_t>(hv)]);
         shape.boxes[static_cast<std::size_t>(boxId)].size++;
-        boxOfCells[ci] = boxId;
+        tlBoxOfCells[ci] = boxId;
         // 复用 cellHash：改为保存 格子 → 单位格 id。
         cellHash[x][y] = U128{static_cast<std::uint64_t>(boxId), 0};
     }
 
     // 2. 按 box 顺序扁平收集格子（桶收集，O(C)，替代 box×cells 双循环）。
-    std::vector<std::vector<CellId>> buckets(shape.boxes.size());
+    tlBuckets.assign(shape.boxes.size(), {});
     for (std::size_t ci = 0; ci < cells.size(); ++ci) {
-        const BoxId b = boxOfCells[ci];
-        if (b == -1) continue;  // 数字格无单位格归属
-        buckets[static_cast<std::size_t>(b)].push_back(
+        const BoxId b = tlBoxOfCells[ci];
+        if (b == static_cast<BoxId>(-1)) continue;  // 数字格无单位格归属
+        tlBuckets[static_cast<std::size_t>(b)].push_back(
             state.id(cells[ci].first, cells[ci].second));
     }
     inst.boxes.boxOf.push_back(0);
-    for (std::size_t b = 0; b < buckets.size(); ++b) {
-        inst.boxes.cells.insert(inst.boxes.cells.end(), buckets[static_cast<std::size_t>(b)].begin(),
-                                buckets[static_cast<std::size_t>(b)].end());
+    for (std::size_t b = 0; b < tlBuckets.size(); ++b) {
+        inst.boxes.cells.insert(inst.boxes.cells.end(), tlBuckets[static_cast<std::size_t>(b)].begin(),
+                                tlBuckets[static_cast<std::size_t>(b)].end());
         inst.boxes.boxOf.push_back(static_cast<std::uint16_t>(inst.boxes.cells.size()));
     }
 
     // 3. 数字格 → 约束。
-    std::vector<char> boxUsed(shape.boxes.size(), 0);
+    tlBoxUsed.assign(shape.boxes.size(), 0);
     for (auto [x, y] : cells) {
         if (!isNumber(state.board[x][y])) continue;
         Shape::Constraint c;
@@ -294,13 +310,13 @@ inline Structure::Instance Structure::buildComponent(
             if (basic.marks[nx][ny] == Mark::Mine) c.sum--;
             if (basic.marks[nx][ny] == Mark::Frontier) {
                 const BoxId boxId = static_cast<BoxId>(cellHash[nx][ny].lo);
-                if (!boxUsed[static_cast<std::size_t>(boxId)]) {
-                    boxUsed[static_cast<std::size_t>(boxId)] = 1;
+                if (!tlBoxUsed[static_cast<std::size_t>(boxId)]) {
+                    tlBoxUsed[static_cast<std::size_t>(boxId)] = 1;
                     c.boxIds.push_back(boxId);
                 }
             }
         });
-        for (BoxId id : c.boxIds) boxUsed[static_cast<std::size_t>(id)] = 0;
+        for (BoxId id : c.boxIds) tlBoxUsed[static_cast<std::size_t>(id)] = 0;
         shape.constraints.push_back(std::move(c));
         inst.constraintCells.push_back(state.id(x, y));
     }
@@ -337,12 +353,15 @@ inline Structure::Delta Structure::Updater::update(const ObservedBoard& state,
     static thread_local Grid<U128> cellHash;
     static thread_local std::vector<std::pair<int, int>> dirtyCells;
     static thread_local std::vector<std::pair<int, int>> cells;
+    static thread_local std::vector<char> removedFlag;
     if (dirty.rows() != rows || dirty.cols() != cols) {
         dirty.resize(rows, cols, 0);
         vis.resize(rows, cols, 0);
         cellHash.resize(rows, cols, U128{});
         cells.reserve(static_cast<std::size_t>(rows * cols / 2));
     }
+    if (removedFlag.size() < result.components.size())
+        removedFlag.resize(result.components.size(), 0);
 
     // 标记某格为脏：去重，并记录位置到 dirtyCells。
     auto markDirty = [&](int x, int y) {
@@ -362,7 +381,7 @@ inline Structure::Delta Structure::Updater::update(const ObservedBoard& state,
         forEachAdjacent(x, y, rows, cols, [&](int nx, int ny) { markDirty(nx, ny); });
     }
 
-    // 2. 通过 cellLoc 反查脏格所属连通块，整个连通块作废（墓碑摘除）。
+    // 2. 通过 cellLoc 反查脏格所属连通块，整块作废（清归属、记 removed）。
     //    dirtyCells 在本步骤开始前的内容只来自值事件和八邻域；
     //    遍历固定前缀，避免 markDirty 追加元素时使迭代器失效。
     const std::size_t initialDirtyCount = dirtyCells.size();
@@ -370,8 +389,7 @@ inline Structure::Delta Structure::Updater::update(const ObservedBoard& state,
         const auto [x, y] = dirtyCells[i];
         const CellLocation loc = result.cellLoc[static_cast<std::size_t>(state.id(x, y))];
         if (loc.component == -1) continue;
-        Instance& inst = result.components[static_cast<std::size_t>(loc.component)];
-        if (!inst.alive) continue;
+        const Instance& inst = result.components[static_cast<std::size_t>(loc.component)];
 
         // 连通块是不可拆分的更新单位：命中一格，整块纳入重建。
         // 先标脏并清掉旧归属，避免后续 dirtyCells 读到已摘除的组件。
@@ -386,8 +404,35 @@ inline Structure::Delta Structure::Updater::update(const ObservedBoard& state,
             markDirty(cx, cy);
             clearCellLoc(cx, cy);
         }
-        inst.alive = false;  // 墓碑保留，数据不删，undo 可恢复
         delta.removed.push_back(loc.component);
+        removedFlag[static_cast<std::size_t>(loc.component)] = 1;
+    }
+
+    // 2.5 真删除（无墓碑）：计数排序降序扫描 removedFlag，swap-pop + 重映射 cellLoc。
+    //     降序保证移动来源（当前尾部）必是活组件（标记的更小 id 尚未处理）；
+    //     被移动组件未被标脏（脏组件必进 removed），其 cellLoc 完好可重映射。
+    //     扫描范围用删除前快照 N：pop 后 size 递减，cid 恒 < 当前 size，安全。
+    {
+        const ComponentId N = static_cast<ComponentId>(result.components.size());
+        for (ComponentId cid = N - 1; cid >= 0; --cid) {
+            if (!removedFlag[static_cast<std::size_t>(cid)]) continue;
+            removedFlag[static_cast<std::size_t>(cid)] = 0;
+            const ComponentId last =
+                static_cast<ComponentId>(result.components.size()) - 1;
+            if (cid != last) {
+                result.components[static_cast<std::size_t>(cid)] =
+                    std::move(result.components[static_cast<std::size_t>(last)]);
+                // 重映射被移动组件的 cellLoc。
+                const Instance& moved = result.components[static_cast<std::size_t>(cid)];
+                for (std::size_t b = 0; b < moved.boxes.count(); ++b)
+                    for (std::size_t k = moved.boxes.boxOf[b]; k < moved.boxes.boxOf[b + 1]; ++k)
+                        result.cellLoc[static_cast<std::size_t>(moved.boxes.cells[k])] =
+                            CellLocation{cid, static_cast<BoxId>(b)};
+                for (CellId c : moved.constraintCells)
+                    result.cellLoc[static_cast<std::size_t>(c)] = CellLocation{cid, -1};
+            }
+            result.components.pop_back();
+        }
     }
 
     // 3. 重建脏区域：只遍历 dirtyCells，从每个未访问的前沿脏格出发重建连通块。
@@ -410,16 +455,18 @@ inline Structure::Delta Structure::Updater::update(const ObservedBoard& state,
         cells.clear();
         collectComponent(x, y, state, basic, vis, cells);
         for (auto [cx, cy] : cells) cellHash[cx][cy] = hashAt(cx, cy);
-        result.components.push_back(buildComponent(cells, state, basic, cellHash, pool));
+        Instance inst = buildComponent(cells, state, basic, cellHash, pool);
+        result.components.push_back(inst);
         delta.added.push_back(newIdx);
+        delta.addedData.push_back(std::move(inst));
 
         // 回填 cellLoc。
-        const Instance& inst = result.components[static_cast<std::size_t>(newIdx)];
-        for (std::size_t b = 0; b < inst.boxes.count(); ++b)
-            for (std::size_t k = inst.boxes.boxOf[b]; k < inst.boxes.boxOf[b + 1]; ++k)
-                result.cellLoc[static_cast<std::size_t>(inst.boxes.cells[k])] =
+        const Instance& written = result.components[static_cast<std::size_t>(newIdx)];
+        for (std::size_t b = 0; b < written.boxes.count(); ++b)
+            for (std::size_t k = written.boxes.boxOf[b]; k < written.boxes.boxOf[b + 1]; ++k)
+                result.cellLoc[static_cast<std::size_t>(written.boxes.cells[k])] =
                     CellLocation{newIdx, static_cast<BoxId>(b)};
-        for (CellId c : inst.constraintCells)
+        for (CellId c : written.constraintCells)
             result.cellLoc[static_cast<std::size_t>(c)] = CellLocation{newIdx, -1};
         ++newIdx;
     }
@@ -433,6 +480,39 @@ inline Structure::Delta Structure::Updater::update(const ObservedBoard& state,
     dirtyCells.clear();
 
     return delta;
+}
+
+// 把 Delta 应用到另一份 Result（搜索树增量重放）。与 update 的结构变更部分
+// 完全等价：降序删 removed（swap-pop + cellLoc 重映射）、按序追加 addedData。
+// 前置：result 必须是产生该 Delta 时的那份状态（从根沿路径应用即满足）。
+inline void Structure::Updater::applyDelta(Result& result, const Delta& delta) {
+    for (auto it = delta.removed.rbegin(); it != delta.removed.rend(); ++it) {
+        const ComponentId cid = *it;
+        const ComponentId last = static_cast<ComponentId>(result.components.size()) - 1;
+        if (cid != last) {
+            result.components[static_cast<std::size_t>(cid)] =
+                std::move(result.components[static_cast<std::size_t>(last)]);
+            const Instance& moved = result.components[static_cast<std::size_t>(cid)];
+            for (std::size_t b = 0; b < moved.boxes.count(); ++b)
+                for (std::size_t k = moved.boxes.boxOf[b]; k < moved.boxes.boxOf[b + 1]; ++k)
+                    result.cellLoc[static_cast<std::size_t>(moved.boxes.cells[k])] =
+                        CellLocation{cid, static_cast<BoxId>(b)};
+            for (CellId c : moved.constraintCells)
+                result.cellLoc[static_cast<std::size_t>(c)] = CellLocation{cid, -1};
+        }
+        result.components.pop_back();
+    }
+    for (std::size_t i = 0; i < delta.addedData.size(); ++i) {
+        const ComponentId cid = static_cast<ComponentId>(result.components.size());
+        result.components.push_back(delta.addedData[i]);
+        const Instance& inst = result.components[static_cast<std::size_t>(cid)];
+        for (std::size_t b = 0; b < inst.boxes.count(); ++b)
+            for (std::size_t k = inst.boxes.boxOf[b]; k < inst.boxes.boxOf[b + 1]; ++k)
+                result.cellLoc[static_cast<std::size_t>(inst.boxes.cells[k])] =
+                    CellLocation{cid, static_cast<BoxId>(b)};
+        for (CellId c : inst.constraintCells)
+            result.cellLoc[static_cast<std::size_t>(c)] = CellLocation{cid, -1};
+    }
 }
 
 }  // namespace mss

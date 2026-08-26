@@ -27,13 +27,13 @@ static int gFail = 0;
 static long long gCheck = 0;
 static long long gCells = 0;
 // 特殊路径覆盖统计
-static long long covFixed = 0;    // x �?Mine 标记邻居（digit 平移�?
-static long long covSize1 = 0;    // x �?size-1 box
-static long long covSafe = 0;     // x �?Safe 标记的隐藏格
-static long long covT = 0;        // x �?T 格（Unknown�?
-static long long covBox = 0;      // x 在前�?box
-static long long covUT = 0;       // x �?T 邻居（uT>0�?
-static long long covMineCell = 0; // x �?Mine 标记（explosion=1�?
+static long long covFixed = 0;    // x �?Mine 标记邻居（digit 平移�?
+static long long covSize1 = 0;    // x �?size-1 box
+static long long covSafe = 0;     // x �?Safe 标记的隐藏格
+static long long covT = 0;        // x �?T 格（Unknown�?
+static long long covBox = 0;      // x 在前�?box
+static long long covUT = 0;       // x �?T 邻居（uT>0�?
+static long long covMineCell = 0; // x �?Mine 标记（explosion=1�?
 
 static void check(bool ok, const char* what) {
     ++gCheck;
@@ -49,7 +49,7 @@ struct Counts {
     long long total = 0;
 };
 
-// 对单个隐藏格：记录覆盖统计�?
+// 对单个隐藏格：记录覆盖统计�?
 static void cover(const ObservedBoard& board, const Basic::Result& basic,
                   const Structure::Result& structure, int x, int y) {
     const CellId c = board.id(x, y);
@@ -119,7 +119,7 @@ static void bruteSmall(const ObservedBoard& board, std::vector<Counts>& counts) 
     } while (std::next_permutation(sel.begin(), sel.end()));
 }
 
-// 对整盘做"observe vs 穷举"核对�?
+// 对整盘做"observe vs 穷举"核对�?
 static void verifyObserved(const ObservedBoard& board) {
     const Basic::Result basic = Basic::Analyzer::analyze(board);
     if (!basic.valid) return;
@@ -153,12 +153,12 @@ static void verifyObserved(const ObservedBoard& board) {
         }
 }
 
-// �� mss_1.2.cpp �� main ���ã���ʱ���أ������� exit��
+// �� mss_1.2.cpp �� main ���ã���ʱ���أ������� exit��
 void runObserveBruteTest() {
     setvbuf(stdout, nullptr, _IONBF, 0);
 
     // ── 1. 手工构造板 ──
-    std::printf("== 1. 手工�?==\n");
+    std::printf("== 1. 手工�?==\n");
     {
         // 4x4 / 4，全部隐藏（解析超几何对照）
         ObservedBoard b(4, 4, 4);
@@ -167,7 +167,7 @@ void runObserveBruteTest() {
         ObservedBoard b2(4, 4, 4);
         b2.board[2][2] = Cell::Num1;
         verifyObserved(b2);
-        // 4x4 / 5，中心开 3（周边三雷，�?Mine 标记路径�?
+        // 4x4 / 5，中心开 3（周边三雷，�?Mine 标记路径�?
         ObservedBoard b3(4, 4, 5);
         b3.board[2][2] = Cell::Num3;
         verifyObserved(b3);
@@ -176,18 +176,18 @@ void runObserveBruteTest() {
         b4.board[2][2] = Cell::Num2;
         b4.board[2][3] = Cell::Num3;
         verifyObserved(b4);
-        // 5x5 / 4，两个分离组�?
+        // 5x5 / 4，两个分离组�?
         ObservedBoard b5(5, 5, 4);
         b5.board[2][2] = Cell::Num1;
         b5.board[4][4] = Cell::Num1;
         verifyObserved(b5);
-        // 6x6 / 8，三数字�?
+        // 6x6 / 8，三数字�?
         ObservedBoard b6(6, 6, 8);
         b6.board[2][2] = Cell::Num2;
         b6.board[3][2] = Cell::Num1;
         b6.board[3][3] = Cell::Num2;
         verifyObserved(b6);
-        // 5x5 / 5：Safe 标记路径�?1,1)=3 逼出 3 �?Mine�?1,2)=2 已满�?�?(1,3)(2,3) Safe�?
+        // 5x5 / 5：Safe 标记路径�?1,1)=3 逼出 3 �?Mine�?1,2)=2 已满�?�?(1,3)(2,3) Safe�?
         ObservedBoard b7(5, 5, 5);
         b7.board[1][1] = Cell::Num3;
         b7.board[1][2] = Cell::Num2;
@@ -195,7 +195,7 @@ void runObserveBruteTest() {
     }
 
     // ── 2. 随机布局生成的观测盘（保证一致性）──
-    std::printf("== 2. 随机�?==\n");
+    std::printf("== 2. 随机�?==\n");
     std::mt19937_64 rng(12345);
     for (int trial = 0; trial < 60; ++trial) {
         const int rows = 4 + static_cast<int>(rng() % 2);   // 4..5
@@ -246,14 +246,14 @@ void runObserveBruteTest() {
                 const auto& board = an.state();
                 const auto& basic = an.basicMarks();
                 const auto& structure = an.structure();
-                // 廉价上界：所有可放雷格（T �?+ 活组件格）任�?M �?
+                // 廉价上界：所有可放雷格（T �?+ 活组件格）任�?M �?
                 const int M = board.totalMines - basic.mineSum;
                 int placeable = basic.unknownSum;
                 for (const auto& inst : structure.components)
-                    if (inst.alive) placeable += static_cast<int>(inst.boxes.cells.size());
+                    placeable += static_cast<int>(inst.boxes.cells.size());
                 const ld coarse = comb(placeable, M);
                 if (coarse > 300000.0L || placeable < M) break;
-                // 统计方案�?
+                // 统计方案�?
                 long long count = 0;
                 Distribution::Solver::all_distribute(
                     board, basic, structure, [&](const std::vector<CellId>&) { ++count; });
@@ -318,8 +318,8 @@ void runObserveBruteTest() {
         }
     }
 
-    std::printf("核对 %lld 格；�?%lld 项检查，失败 %d 项\n", gCells, gCheck, gFail);
-    std::printf("覆盖: T�?%lld box�?%lld size1box=%lld Safe�?%lld Mine标记�?%lld "
+    std::printf("核对 %lld 格；�?%lld 项检查，失败 %d 项\n", gCells, gCheck, gFail);
+    std::printf("覆盖: T�?%lld box�?%lld size1box=%lld Safe�?%lld Mine标记�?%lld "
                 "有Mine邻居=%lld 有T邻居=%lld\n",
                 covT, covBox, covSize1, covSafe, covMineCell, covFixed, covUT);
     std::exit(gFail == 0 ? 0 : 1);

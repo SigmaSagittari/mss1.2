@@ -114,12 +114,11 @@ inline AnalyzeResult analyze(const ObservedBoard& state) {
     }
     out.valid = true;
 
-    // 合法性 2：每个活连通块的分布非空（无可行摆法 = 结构矛盾）。
+    // 合法性 2：每个连通块的分布非空（无可行摆法 = 结构矛盾）。
     for (ComponentId cid = 0; cid < static_cast<ComponentId>(structure.components.size());
          ++cid) {
         const Structure::Instance& inst =
             structure.components[static_cast<std::size_t>(cid)];
-        if (!inst.alive) continue;
         const Distribution* dist = Distribution::Solver::analyze(*inst.shape, dists);
         if (dist->entries.empty()) {
             out.valid = false;
