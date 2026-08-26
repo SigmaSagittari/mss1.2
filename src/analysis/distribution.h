@@ -134,30 +134,32 @@ inline void Distribution::Solver::forEachAssignment(const Structure::Shape& shap
                                                     OnAssignment&& onAssignment) {
     const int n = static_cast<int>(shape.boxes.size());
 
-    // 预处理：每个单位格依赖哪些限制（只在"最后一个单位格"被赋值时检查）。
-    std::vector<std::vector<int>> boxToLimits(n);
+    // 线程局部复用工作区（无重入）：避免每次分析的嵌套 vector 分配。
+    static thread_local std::vector<std::vector<int>> tlBoxToLimits;
+    static thread_local std::vector<char> tlAssignment;
+    tlBoxToLimits.assign(static_cast<std::size_t>(n), {});
     for (int i = 0; i < static_cast<int>(shape.constraints.size()); ++i) {
         int maxBox = 0;
         for (BoxId boxId : shape.constraints[static_cast<std::size_t>(i)].boxIds)
             maxBox = std::max(maxBox, static_cast<int>(boxId));
-        boxToLimits[static_cast<std::size_t>(maxBox)].push_back(i);
+        tlBoxToLimits[static_cast<std::size_t>(maxBox)].push_back(i);
     }
+    tlAssignment.assign(static_cast<std::size_t>(n), 0);
 
-    std::vector<char> assignment(n);
     auto dfs = [&](auto&& self, int idx, long double curWays) -> void {
         if (idx == n) {
-            onAssignment(assignment, curWays);
+            onAssignment(tlAssignment, curWays);
             return;
         }
         const int maxK = shape.boxes[static_cast<std::size_t>(idx)].size;
         for (int k = 0; k <= maxK; ++k) {
-            assignment[static_cast<std::size_t>(idx)] = static_cast<char>(k);
+            tlAssignment[static_cast<std::size_t>(idx)] = static_cast<char>(k);
             const long double newWays = curWays * binom(maxK, k);
             bool ok = true;
-            for (int limitId : boxToLimits[static_cast<std::size_t>(idx)]) {
+            for (int limitId : tlBoxToLimits[static_cast<std::size_t>(idx)]) {
                 int s = 0;
                 for (BoxId boxId : shape.constraints[static_cast<std::size_t>(limitId)].boxIds)
-                    s += assignment[static_cast<std::size_t>(boxId)];
+                    s += tlAssignment[static_cast<std::size_t>(boxId)];
                 if (s != shape.constraints[static_cast<std::size_t>(limitId)].sum) {
                     ok = false;
                     break;
@@ -177,18 +179,20 @@ inline const Distribution* Distribution::Solver::analyze(const Structure::Shape&
     int maxTotal = 0;
     for (const auto& box : shape.boxes) maxTotal += box.size;
 
-    // 组合数表：box 规模 ≤ 8，8 够用。
-    std::vector<long double> wayTable(static_cast<std::size_t>(maxTotal + 1), 0.0);
-    std::vector<std::vector<long double>> expectTable(
-        static_cast<std::size_t>(maxTotal + 1),
-        std::vector<long double>(static_cast<std::size_t>(n), 0.0));
+    // 线程局部复用工作区（analyze 非重入、无并发）：避免每块新建嵌套 vector。
+    static thread_local std::vector<long double> wayTable;
+    static thread_local std::vector<long double> expectFlat;
+    wayTable.assign(static_cast<std::size_t>(maxTotal + 1), 0.0L);
+    expectFlat.assign(static_cast<std::size_t>(maxTotal + 1) * static_cast<std::size_t>(n),
+                      0.0L);
 
     forEachAssignment(shape, [&](const std::vector<char>& assignment, long double ways) {
         int total = 0;
         for (int i = 0; i < n; ++i) total += assignment[static_cast<std::size_t>(i)];
         wayTable[static_cast<std::size_t>(total)] += ways;
+        const std::size_t row = static_cast<std::size_t>(total) * static_cast<std::size_t>(n);
         for (int i = 0; i < n; ++i)
-            expectTable[static_cast<std::size_t>(total)][static_cast<std::size_t>(i)] +=
+            expectFlat[row + static_cast<std::size_t>(i)] +=
                 ways * assignment[static_cast<std::size_t>(i)];
     });
 
@@ -198,11 +202,11 @@ inline const Distribution* Distribution::Solver::analyze(const Structure::Shape&
         Entry e;
         e.mineCount = total;
         e.ways = wayTable[static_cast<std::size_t>(total)];
+        const std::size_t row = static_cast<std::size_t>(total) * static_cast<std::size_t>(n);
         e.perBoxExpectation.resize(static_cast<std::size_t>(n));
         for (int i = 0; i < n; ++i)
             e.perBoxExpectation[static_cast<std::size_t>(i)] =
-                expectTable[static_cast<std::size_t>(total)][static_cast<std::size_t>(i)] /
-                e.ways;
+                expectFlat[row + static_cast<std::size_t>(i)] / e.ways;
         dist.entries.push_back(std::move(e));
     }
 

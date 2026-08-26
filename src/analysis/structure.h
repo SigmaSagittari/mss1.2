@@ -269,14 +269,18 @@ inline Structure::Instance Structure::buildComponent(
         cellHash[x][y] = U128{static_cast<std::uint64_t>(boxId), 0};
     }
 
-    // 2. 按 box 顺序扁平收集格子。
+    // 2. 按 box 顺序扁平收集格子（桶收集，O(C)，替代 box×cells 双循环）。
+    std::vector<std::vector<CellId>> buckets(shape.boxes.size());
+    for (std::size_t ci = 0; ci < cells.size(); ++ci) {
+        const BoxId b = boxOfCells[ci];
+        if (b == -1) continue;  // 数字格无单位格归属
+        buckets[static_cast<std::size_t>(b)].push_back(
+            state.id(cells[ci].first, cells[ci].second));
+    }
     inst.boxes.boxOf.push_back(0);
-    for (std::size_t b = 0; b < shape.boxes.size(); ++b) {
-        for (std::size_t ci = 0; ci < cells.size(); ++ci) {
-            if (boxOfCells[ci] == static_cast<BoxId>(b)) {
-                inst.boxes.cells.push_back(state.id(cells[ci].first, cells[ci].second));
-            }
-        }
+    for (std::size_t b = 0; b < buckets.size(); ++b) {
+        inst.boxes.cells.insert(inst.boxes.cells.end(), buckets[static_cast<std::size_t>(b)].begin(),
+                                buckets[static_cast<std::size_t>(b)].end());
         inst.boxes.boxOf.push_back(static_cast<std::uint16_t>(inst.boxes.cells.size()));
     }
 

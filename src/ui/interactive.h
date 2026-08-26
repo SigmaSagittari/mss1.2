@@ -42,15 +42,8 @@ inline long double tCellProbability(const GameController::Analysis& an);
 // 整盘概率网格物化（1-based，与棋盘一致）。逐格查询，O(rows*cols)。
 inline Grid<long double> materializeProbability(GameController::Analysis& an);
 
-// 当前引擎为 Approx 时，用精确引擎全量重算某格雷概率（详情面板对比用）。
-inline long double exactMineProbability(const GameController::Analysis& an, int x, int y);
-
 // 点开某格的结果分布（explosion + digit[0..8]），详情面板查询。
-// Exact 引擎复用当前 Result；Approx 引擎现算精确视图（与 exactMineProbability 同源）。
 inline Probability::ObserveResult observe(GameController::Analysis& an, int x, int y);
-
-// 始终用精确引擎计算点开分布（详情面板 Approx 模式对比用；现算全量）。
-inline Probability::ObserveResult exactObserve(GameController::Analysis& an, int x, int y);
 
 // ── 全局分析（编辑后的盘面全量重构）──
 
@@ -71,28 +64,22 @@ struct AnalyzeResult {
 };
 
 // 对（可能被编辑过的）盘面做全局分析：全量重构 basic/structure/probability，
-// 合法性检查 → 候选数 → 低于暴力阈值则残局求解。不用增量 Approx 管线。
+// 合法性检查 → 候选数 → 低于暴力阈值则残局求解。
 inline AnalyzeResult analyze(const ObservedBoard& board);
 
 // ── 实现区 ──
 
 inline long double mineProbability(GameController::Analysis& an, int x, int y) {
-    using Engine = GameController::Analysis::Engine;
-    if (an.engine() == Engine::Exact)
-        return an.probability().mineProbability(an.state().id(x, y), an.state(),
-                                                an.basicMarks(), an.structure());
-    return RhoRational::eval(x, y, an.state(), an.basicMarks(), an.structure(),
-                             an.dists(), an.rationals(), an.approx().rho);
+    return an.probability().mineProbability(an.state().id(x, y), an.state(),
+                                            an.basicMarks(), an.structure());
 }
 
 inline long double candidates(const GameController::Analysis& an) {
-    using Engine = GameController::Analysis::Engine;
-    return an.engine() == Engine::Exact ? an.probability().candidates : an.approx().candidates;
+    return an.probability().candidates;
 }
 
 inline long double tCellProbability(const GameController::Analysis& an) {
-    using Engine = GameController::Analysis::Engine;
-    return an.engine() == Engine::Exact ? an.probability().tCellProbability : an.approx().rho;
+    return an.probability().tCellProbability;
 }
 
 inline Grid<long double> materializeProbability(GameController::Analysis& an) {
@@ -103,39 +90,18 @@ inline Grid<long double> materializeProbability(GameController::Analysis& an) {
     return grid;
 }
 
-inline long double exactMineProbability(const GameController::Analysis& an, int x, int y) {
-    Distribution::DistPool dists;
-    const Probability::Result exact =
-        Exact::analyze(an.state(), an.basicMarks(), an.structure(), dists);
-    return exact.mineProbability(an.state().id(x, y), an.state(), an.basicMarks(),
-                                 an.structure());
-}
-
 inline Probability::ObserveResult observe(GameController::Analysis& an, int x, int y) {
-    using Engine = GameController::Analysis::Engine;
     const ObservedBoard& state = an.state();
     const auto& basic = an.basicMarks();
     const auto& structure = an.structure();
-    if (an.engine() == Engine::Exact)
-        return Exact::observe(state, basic, structure, an.probability(), an.dists(),
-                              state.id(x, y));
-    return Approx::observe(state, basic, structure, an.dists(), an.approx(),
-                           state.id(x, y));
-}
-
-inline Probability::ObserveResult exactObserve(GameController::Analysis& an, int x, int y) {
-    const ObservedBoard& state = an.state();
-    const auto& basic = an.basicMarks();
-    const auto& structure = an.structure();
-    Distribution::DistPool dists;
-    const Probability::Result exact = Exact::analyze(state, basic, structure, dists);
-    return Exact::observe(state, basic, structure, exact, dists, state.id(x, y));
+    return Exact::observe(state, basic, structure, an.probability(), an.dists(),
+                          state.id(x, y));
 }
 
 inline AnalyzeResult analyze(const ObservedBoard& state) {
     AnalyzeResult out;
 
-    // 编辑后每次点「开始分析」全量重构（编辑不维护增量 Approx 管线）。
+    // 编辑后每次点「开始分析」全量重构。
     const Basic::Result basic = Basic::Analyzer::analyze(state);
     Structure::ShapePool shapes;
     const Structure::Result structure = Structure::Analyzer::analyze(state, basic, shapes);

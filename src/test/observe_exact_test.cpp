@@ -1,5 +1,6 @@
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <random>
 #include <vector>
 
@@ -26,7 +27,8 @@ static void check(bool ok, const char* what) {
     if (!ok) { ++gFail; std::printf("  FAIL: %s\n", what); }
 }
 
-int main() {
+// 由 mss_1.2.cpp 的 main 调用（临时挂载），跑完 exit。
+void runObserveExactTest() {
     // ── A. 4x4/4 全隐藏：解析超几何对照 ──
     std::printf("== A. 4x4/4 全隐藏 ==\n");
     {
@@ -120,5 +122,5 @@ int main() {
     }
     std::printf("  核对 %d 格\n", cells);
     std::printf("\n共 %lld 项检查，失败 %d 项\n", gCheck, gFail);
-    return gFail == 0 ? 0 : 1;
+    std::exit(gFail == 0 ? 0 : 1);
 }

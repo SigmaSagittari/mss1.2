@@ -7,7 +7,6 @@
 #include "analysis/basic.h"
 #include "analysis/distribution.h"
 #include "analysis/probability.h"
-#include "analysis/probability/approx.h"
 #include "analysis/probability/exact.h"
 #include "analysis/rational.h"
 #include "analysis/structure.h"
@@ -41,12 +40,10 @@ struct GameController {
 
     // ── 分析管线 ──
     // 持有 ObservedBoard（数字/Hidden 分析视图）+ 各层结果 + 池 + 概率引擎。
-    // 引擎两选一：Exact（全局重建，无状态，每次全量重算数值 Result）
-    // 或 Approx（增量近似更新，跨 update 累积全局矩 + RhoRational 系数池）。
+    // 概率总是全量（Exact::analyze，热池 ~1.5μs）；结构层可选增量/全量。
     struct Analysis {
-        // 概率引擎选择。对应前端"更新方法"下拉：
-        //   full=全局重建（Exact），incremental=增量近似更新（Approx）。
-        enum class Engine { Exact, Approx };
+        // 结构处理方式：Update = 受影响块增量重建（默认）；Rebuild = 全量重分析。
+        enum class StructureMode { Update, Rebuild };
 
         Analysis(int rows, int cols, int mines) : state_(rows, cols, mines) {}
 
@@ -61,29 +58,20 @@ struct GameController {
         // updates 是本次翻开产生的值事件。
         void update(const std::vector<Basic::Update>& updates) {
             Basic::Updater::update(state_, basic_, updates);
-            const Structure::Delta delta =
-                Structure::Updater::update(state_, basic_, structure_, shapes_, updates);
-            if (engine_ == Engine::Exact)
-                prob_ = Exact::analyze(state_, basic_, structure_, dists_);
+            if (structureMode_ == StructureMode::Rebuild)
+                structure_ = Structure::Analyzer::analyze(state_, basic_, shapes_);
             else
-                Approx::Updater::update(state_, basic_, structure_, dists_, approx_, delta);
+                Structure::Updater::update(state_, basic_, structure_, shapes_, updates);
+            prob_ = Exact::analyze(state_, basic_, structure_, dists_);
         }
 
-        // 切换引擎（重新全量初始化当前引擎的状态）。
-        void setEngine(Engine e) {
-            if (engine_ == e) return;
-            engine_ = e;
-            rebuild();
-        }
-
-        Engine engine() const { return engine_; }
+        void setStructureMode(StructureMode m) { structureMode_ = m; }
+        StructureMode structureMode() const { return structureMode_; }
 
         const Basic::Result& basicMarks() const { return basic_; }
         const Structure::Result& structure() const { return structure_; }
         const Probability::Result& probability() const { return prob_; }
 
-        // 引擎内部状态访问（供 Interactive 层查询/物化）。
-        const Approx::Result& approx() const { return approx_; }
         // 池访问（RhoRational 惰性记忆化需要可变引用；只读查询也走这里）。
         Distribution::DistPool& dists() { return dists_; }
         RhoRational::Pool& rationals() { return rationals_; }
@@ -92,13 +80,8 @@ struct GameController {
         const ObservedBoard& state() const { return state_; }
 
     private:
-        // 按当前引擎重新全量初始化概率状态（开局 / 切换引擎时）。
-        void rebuild() {
-            if (engine_ == Engine::Exact)
-                prob_ = Exact::analyze(state_, basic_, structure_, dists_);
-            else
-                approx_ = Approx::Analyzer::analyze(state_, basic_, structure_, dists_);
-        }
+        // 全量初始化概率状态（开局 / 编辑后）。
+        void rebuild() { prob_ = Exact::analyze(state_, basic_, structure_, dists_); }
 
         ObservedBoard state_;                  // 分析视图（数字/Hidden），经 update 维护
         Basic::Result basic_;
@@ -107,8 +90,7 @@ struct GameController {
         Distribution::DistPool dists_;         // 分布池（本游戏生命周期）
         RhoRational::Pool rationals_;          // 系数池（本游戏生命周期）
         Probability::Result prob_;             // Exact 产物（数值视图）
-        Approx::Result approx_;                // Approx 产物（增量状态）
-        Engine engine_ = Engine::Approx;       // 默认增量近似更新
+        StructureMode structureMode_ = StructureMode::Update;
     };
 
     // ── 构造：开局即分析 ──

@@ -27,7 +27,7 @@ namespace mss {
 // 能保证赢下多少条方案"。可输出每个候选初始招法的精确胜数。
 //
 // 依赖 distribution.h 的 all_distribute（枚举摆雷）+ 调用方传入的
-// 单格雷概率网格（引擎无关：Exact/Approx 物化均可）。precheck 用
+// 单格雷概率网格（Exact 物化）。precheck 用
 // Exact::analyze 现算候选数，超过 kMaxBruteforceCount 直接 assert_。
 //
 // 数学/数据结构细节（Session、ScratchBuffers、solve 递归）全私有。

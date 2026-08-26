@@ -34,6 +34,15 @@
     <ClCompile Include="mss_1.2.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="test\struct_perf_test.cpp">
+      <Filter>test</Filter>
+    </ClCompile>
+    <ClCompile Include="test\observe_brute_test.cpp">
+      <Filter>test</Filter>
+    </ClCompile>
+    <ClCompile Include="test\observe_exact_test.cpp">
+      <Filter>test</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="analysis\basic.h">
@@ -47,9 +56,6 @@
     </ClInclude>
     <ClInclude Include="analysis\structure.h">
       <Filter>analysis</Filter>
-    </ClInclude>
-    <ClInclude Include="analysis\probability\approx.h">
-      <Filter>analysis\probability</Filter>
     </ClInclude>
     <ClInclude Include="analysis\probability\exact.h">
       <Filter>analysis\probability</Filter>
@@ -109,9 +115,6 @@
     </None>
     <None Include="ui\web\style.css">
       <Filter>ui\web</Filter>
-    </None>
-    <None Include="test\solve_rho_test.cpp">
-      <Filter>test</Filter>
     </None>
   </ItemGroup>
 </Project>

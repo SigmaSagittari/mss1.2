@@ -237,30 +237,22 @@ private:
         // 新局丢弃分析会话（编辑快照/分析态随旧局失效）。
         editSaved_.reset();
         analyzerActive_ = false;
-        // 前端可随新局携带引擎模式（mode: "full"|"incremental"）。
-        const std::string needle = "\"mode\"";
-        const size_t pos = req.body.find(needle);
-        if (pos != std::string::npos)
-            game_->analysis().setEngine(
-                req.body.find("incremental", pos) != std::string::npos
-                    ? GameController::Analysis::Engine::Approx
-                    : GameController::Analysis::Engine::Exact);
         return jsonState();
     }
 
-    // 读当前引擎模式（前端初始化同步用）。
+    // 读当前结构处理方式（前端初始化同步用）。概率恒全量。
     HttpResponse jsonConfigGet() const {
-        using Engine = GameController::Analysis::Engine;
+        using SM = GameController::Analysis::StructureMode;
         const std::string mode =
-            game_->analysis().engine() == Engine::Approx ? "incremental" : "full";
-        return json("{\"mode\":\"" + mode + "\"}");
+            game_->analysis().structureMode() == SM::Rebuild ? "rebuild" : "update";
+        return json("{\"structMode\":\"" + mode + "\"}");
     }
 
-    // 写引擎模式（切换增量近似更新 / 全局重建）。
+    // 写结构处理方式（rebuild = 全量重建 / update = 增量）。概率恒全量。
     HttpResponse jsonConfig(const HttpRequest& req) {
-        using Engine = GameController::Analysis::Engine;
-        game_->analysis().setEngine(
-            req.body.find("incremental") != std::string::npos ? Engine::Approx : Engine::Exact);
+        using SM = GameController::Analysis::StructureMode;
+        game_->analysis().setStructureMode(
+            req.body.find("rebuild") != std::string::npos ? SM::Rebuild : SM::Update);
         return jsonConfigGet();
     }
 
@@ -334,77 +326,25 @@ private:
             stateLine = "未翻开";
         lines.push_back("状态: " + stateLine);
 
-        using Engine = GameController::Analysis::Engine;
-        const bool approxEngine = (game_->analysis().engine() == Engine::Approx);
         long double p = Interactive::mineProbability(game_->analysis(), x, y);
         std::ostringstream ps;
-        ps << std::setprecision(5) << (approxEngine ? "近似雷概率" : "雷概率") << ": "
+        ps << std::setprecision(5) << "雷概率: "
            << static_cast<double>(p) << "  (" << static_cast<double>(p * 100) << "%)";
         lines.push_back(ps.str());
 
         // 点开结果分布（observe）：爆炸 + 各数字概率（仅未翻开格有意义）。
-        // 近似引擎下每行追加相对差 D% = (近似 − 精确)/精确（以精确为基准；
-        // 精确为零时近似也零 → +0%，否则无定义 → +∞）。
         // 全部数字保留五位有效数字（有效数字，不是小数点后）。
         if (!gi.revealed[x][y]) {
             const Probability::ObserveResult obr = Interactive::observe(game_->analysis(), x, y);
-            const Probability::ObserveResult eobr =
-                approxEngine ? Interactive::exactObserve(game_->analysis(), x, y)
-                             : Probability::ObserveResult{};
             auto fmtPct = [](long double v) {
                 std::ostringstream os;
                 os << std::setprecision(5) << static_cast<double>(v * 100.0L) << '%';
                 return os.str();
             };
-            auto fmtDiff = [](long double a, long double b) {
-                std::ostringstream os;
-                if (std::abs(a - b) < 1e-9L) {
-                    os << std::setprecision(5) << std::showpos << 0.0L << '%'
-                       << std::noshowpos;
-                    return os.str();
-                }
-                if (std::abs(b) < 1e-9L) {
-                    // 精确为零且近似非零：相对差无定义 → +∞
-                    os << "+∞";
-                    return os.str();
-                }
-                os << std::setprecision(5) << std::showpos
-                   << static_cast<double>((a - b) / b * 100.0L) << '%' << std::noshowpos;
-                return os.str();
-            };
-            if (approxEngine) {
-                lines.push_back("点开: 爆炸 " + fmtPct(obr.explosion) + " (" +
-                                fmtDiff(obr.explosion, eobr.explosion) + ")");
-            } else {
-                lines.push_back("点开: 爆炸 " + fmtPct(obr.explosion));
-            }
+            lines.push_back("点开: 爆炸 " + fmtPct(obr.explosion));
             for (int k = 0; k <= 8; ++k) {
-                std::string line = "数字 " + std::to_string(k) + ": " + fmtPct(obr.digit[k]);
-                if (approxEngine)
-                    line += " (" + fmtDiff(obr.digit[k], eobr.digit[k]) + ")";
-                lines.push_back(line);
+                lines.push_back("数字 " + std::to_string(k) + ": " + fmtPct(obr.digit[k]));
             }
-        }
-
-        // 近似引擎下，额外用精确引擎全量重算一遍做对比（UI 层，每次访问现算）。
-        // 差值用相对差（以精确为基准；精确为零时近似也零 → +0%，否则 → +∞）。
-        if (approxEngine) {
-            const auto& an = game_->analysis();
-            const long double ep = Interactive::exactMineProbability(an, x, y);
-            std::ostringstream eps;
-            eps << std::setprecision(5) << "精确对比: " << static_cast<double>(ep)
-                << "  (" << static_cast<double>(ep * 100) << "%, ";
-            if (std::abs(p - ep) < 1e-9L) {
-                eps << std::showpos << 0.0L << "%" << std::noshowpos;
-            } else if (std::abs(ep) < 1e-9L) {
-                eps << "+∞";
-            } else {
-                eps << std::showpos
-                    << static_cast<double>((p - ep) / ep * 100.0L) << "%"
-                    << std::noshowpos;
-            }
-            eps << ")";
-            lines.push_back(eps.str());
         }
 
         std::ostringstream cs;
@@ -427,7 +367,7 @@ private:
     // ---------- 全局分析（分析模式） ----------
     // 分析模式：进入时快照原始盘面（退出还原），编辑直接改分析视图的 ObservedBoard；
     // 每次点「开始分析」从（可能被编辑过的）盘面全量重构 basic/structure/probability，
-    // 不用增量 Approx 管线。合法性 → 候选数（精确）→ 低于暴力阈值则残局求解。
+    // 合法性 → 候选数（精确）→ 低于暴力阈值则残局求解。
     // 与当前引擎无关（候选数/暴力均基于 Exact 精确视图）。
 
     // 进入/退出分析模式：进入保存盘面快照，退出还原（编辑不污染真实游戏盘面）。

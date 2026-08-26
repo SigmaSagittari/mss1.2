@@ -146,13 +146,15 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="mss_1.2.cpp" />
+    <ClCompile Include="test\observe_brute_test.cpp" />
+    <ClCompile Include="test\observe_exact_test.cpp" />
+    <ClCompile Include="test\struct_perf_test.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="analysis\basic.h" />
     <ClInclude Include="analysis\bruteforce\endgame_bruteforce.h" />
     <ClInclude Include="analysis\distribution.h" />
     <ClInclude Include="analysis\probability.h" />
-    <ClInclude Include="analysis\probability\approx.h" />
     <ClInclude Include="analysis\probability\exact.h" />
     <ClInclude Include="analysis\rational.h" />
     <ClInclude Include="analysis\structure.h" />
@@ -170,7 +172,6 @@
     <ClInclude Include="ui\ui_app.h" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="test\solve_rho_test.cpp" />
     <None Include="ui\web\analyzer.js" />
     <None Include="ui\web\index.html" />
     <None Include="ui\web\main.js" />

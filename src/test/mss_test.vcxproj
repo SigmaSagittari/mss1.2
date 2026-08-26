@@ -82,14 +82,15 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="solve_rho_test.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="observe_brute_test.cpp" />
+    <ClCompile Include="observe_exact_test.cpp" />
+    <ClCompile Include="struct_perf_test.cpp" />
     <ClInclude Include="..\analysis\basic.h" />
     <ClInclude Include="..\analysis\bruteforce\endgame_bruteforce.h" />
     <ClInclude Include="..\analysis\distribution.h" />
     <ClInclude Include="..\analysis\probability.h" />
-    <ClInclude Include="..\analysis\probability\approx.h" />
     <ClInclude Include="..\analysis\probability\exact.h" />
     <ClInclude Include="..\analysis\probability\rational.h" />
     <ClInclude Include="..\analysis\rational.h" />

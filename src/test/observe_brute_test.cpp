@@ -2,13 +2,13 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <random>
 #include <vector>
 
 #include "analysis/basic.h"
 #include "analysis/distribution.h"
 #include "analysis/probability.h"
-#include "analysis/probability/approx.h"
 #include "analysis/probability/exact.h"
 #include "analysis/structure.h"
 #include "core/types.h"
@@ -27,13 +27,13 @@ static int gFail = 0;
 static long long gCheck = 0;
 static long long gCells = 0;
 // 特殊路径覆盖统计
-static long long covFixed = 0;    // x 有 Mine 标记邻居（digit 平移）
-static long long covSize1 = 0;    // x 在 size-1 box
-static long long covSafe = 0;     // x 为 Safe 标记的隐藏格
-static long long covT = 0;        // x 为 T 格（Unknown）
-static long long covBox = 0;      // x 在前沿 box
-static long long covUT = 0;       // x 有 T 邻居（uT>0）
-static long long covMineCell = 0; // x 为 Mine 标记（explosion=1）
+static long long covFixed = 0;    // x �?Mine 标记邻居（digit 平移�?
+static long long covSize1 = 0;    // x �?size-1 box
+static long long covSafe = 0;     // x �?Safe 标记的隐藏格
+static long long covT = 0;        // x �?T 格（Unknown�?
+static long long covBox = 0;      // x 在前�?box
+static long long covUT = 0;       // x �?T 邻居（uT>0�?
+static long long covMineCell = 0; // x �?Mine 标记（explosion=1�?
 
 static void check(bool ok, const char* what) {
     ++gCheck;
@@ -43,35 +43,13 @@ static void check(bool ok, const char* what) {
     }
 }
 
-// ── Approx 误差分桶：按 rho 初始相对误差分档，统计各档内实际数字/爆炸误差 ──
-// 回答"rho 相对误差 X 时，最多可能看到多大的数字误差"。
-static constexpr int kRhoBucketCount = 8;
-static long long gBucketCells[kRhoBucketCount] = {};   // 每桶格数
-static long long gBucketChecks[kRhoBucketCount] = {};  // 每桶数字检查数
-static long double gBucketSumDigit[kRhoBucketCount] = {};
-static long double gBucketMaxDigit[kRhoBucketCount] = {};
-static long double gBucketSumExpl[kRhoBucketCount] = {};
-static long double gBucketMaxExpl[kRhoBucketCount] = {};
-
-// rho 相对误差分档：[0,0.5%) [0.5,1%) [1,2%) [2,4%) [4,8%) [8,16%) [16,32%) [32%,∞)
-static int rhoBucket(long double r) {
-    if (r < 0.005L) return 0;
-    if (r < 0.01L) return 1;
-    if (r < 0.02L) return 2;
-    if (r < 0.04L) return 3;
-    if (r < 0.08L) return 4;
-    if (r < 0.16L) return 5;
-    if (r < 0.32L) return 6;
-    return 7;
-}
-
 struct Counts {
     std::array<long long, 9> digit{};
     long long explosion = 0;
     long long total = 0;
 };
 
-// 对单个隐藏格：记录覆盖统计。
+// 对单个隐藏格：记录覆盖统计�?
 static void cover(const ObservedBoard& board, const Basic::Result& basic,
                   const Structure::Result& structure, int x, int y) {
     const CellId c = board.id(x, y);
@@ -141,7 +119,7 @@ static void bruteSmall(const ObservedBoard& board, std::vector<Counts>& counts) 
     } while (std::next_permutation(sel.begin(), sel.end()));
 }
 
-// 对整盘做"observe vs 穷举"核对。
+// 对整盘做"observe vs 穷举"核对�?
 static void verifyObserved(const ObservedBoard& board) {
     const Basic::Result basic = Basic::Analyzer::analyze(board);
     if (!basic.valid) return;
@@ -173,51 +151,14 @@ static void verifyObserved(const ObservedBoard& board) {
             }
             ++gCells;
         }
-
-    // Approx 对照：按 rho 初始相对误差分桶填误差统计（无固定容差断言）。
-    {
-        const Approx::Result ar = Approx::Analyzer::analyze(board, basic, structure, pool);
-        for (int x = 1; x <= board.rows; ++x)
-            for (int y = 1; y <= board.cols; ++y) {
-                if (board.board[x][y] != Cell::Hidden) continue;
-                const CellId c = board.id(x, y);
-                const auto ra = Approx::observe(board, basic, structure, pool, ar, c);
-                const Counts& ct = counts[static_cast<std::size_t>(c)];
-                if (ct.total == 0) continue;
-                char buf[160];
-                // rho 初始误差：近似爆炸（= rho 测度下的雷概率）相对精确的偏差
-                const ld exactE = static_cast<ld>(ct.explosion) / ct.total;
-                const ld rhoRel =
-                    exactE > 1e-12L ? std::abs(ra.explosion - exactE) / exactE
-                                    : std::abs(ra.explosion - exactE);
-                const int b = rhoBucket(rhoRel);
-                ++gBucketCells[static_cast<std::size_t>(b)];
-                const ld eErr = std::abs(ra.explosion - exactE);
-                gBucketSumExpl[static_cast<std::size_t>(b)] += eErr;
-                gBucketMaxExpl[static_cast<std::size_t>(b)] =
-                    (std::max)(gBucketMaxExpl[static_cast<std::size_t>(b)], eErr);
-                for (int k = 0; k <= 8; ++k) {
-                    const ld dd = std::abs(ra.digit[static_cast<std::size_t>(k)] -
-                                           static_cast<ld>(ct.digit[static_cast<std::size_t>(k)]) /
-                                               ct.total);
-                    gBucketSumDigit[static_cast<std::size_t>(b)] += dd;
-                    gBucketMaxDigit[static_cast<std::size_t>(b)] =
-                        (std::max)(gBucketMaxDigit[static_cast<std::size_t>(b)], dd);
-                    ++gBucketChecks[static_cast<std::size_t>(b)];
-                }
-                std::snprintf(buf, sizeof buf, "A(%d,%d) Σdigit+explosion=1", x, y);
-                ld asum = ra.explosion;
-                for (int k = 0; k <= 8; ++k) asum += ra.digit[static_cast<std::size_t>(k)];
-                check(std::abs(asum - 1.0L) < 1e-9L, buf);
-            }
-    }
 }
 
-int main() {
+// �� mss_1.2.cpp �� main ���ã���ʱ���أ������� exit��
+void runObserveBruteTest() {
     setvbuf(stdout, nullptr, _IONBF, 0);
 
     // ── 1. 手工构造板 ──
-    std::printf("== 1. 手工板 ==\n");
+    std::printf("== 1. 手工�?==\n");
     {
         // 4x4 / 4，全部隐藏（解析超几何对照）
         ObservedBoard b(4, 4, 4);
@@ -226,7 +167,7 @@ int main() {
         ObservedBoard b2(4, 4, 4);
         b2.board[2][2] = Cell::Num1;
         verifyObserved(b2);
-        // 4x4 / 5，中心开 3（周边三雷，有 Mine 标记路径）
+        // 4x4 / 5，中心开 3（周边三雷，�?Mine 标记路径�?
         ObservedBoard b3(4, 4, 5);
         b3.board[2][2] = Cell::Num3;
         verifyObserved(b3);
@@ -235,18 +176,18 @@ int main() {
         b4.board[2][2] = Cell::Num2;
         b4.board[2][3] = Cell::Num3;
         verifyObserved(b4);
-        // 5x5 / 4，两个分离组件
+        // 5x5 / 4，两个分离组�?
         ObservedBoard b5(5, 5, 4);
         b5.board[2][2] = Cell::Num1;
         b5.board[4][4] = Cell::Num1;
         verifyObserved(b5);
-        // 6x6 / 8，三数字链
+        // 6x6 / 8，三数字�?
         ObservedBoard b6(6, 6, 8);
         b6.board[2][2] = Cell::Num2;
         b6.board[3][2] = Cell::Num1;
         b6.board[3][3] = Cell::Num2;
         verifyObserved(b6);
-        // 5x5 / 5：Safe 标记路径（(1,1)=3 逼出 3 个 Mine，(1,2)=2 已满足 → (1,3)(2,3) Safe）
+        // 5x5 / 5：Safe 标记路径�?1,1)=3 逼出 3 �?Mine�?1,2)=2 已满�?�?(1,3)(2,3) Safe�?
         ObservedBoard b7(5, 5, 5);
         b7.board[1][1] = Cell::Num3;
         b7.board[1][2] = Cell::Num2;
@@ -254,7 +195,7 @@ int main() {
     }
 
     // ── 2. 随机布局生成的观测盘（保证一致性）──
-    std::printf("== 2. 随机板 ==\n");
+    std::printf("== 2. 随机�?==\n");
     std::mt19937_64 rng(12345);
     for (int trial = 0; trial < 60; ++trial) {
         const int rows = 4 + static_cast<int>(rng() % 2);   // 4..5
@@ -305,14 +246,14 @@ int main() {
                 const auto& board = an.state();
                 const auto& basic = an.basicMarks();
                 const auto& structure = an.structure();
-                // 廉价上界：所有可放雷格（T 格 + 活组件格）任选 M 个
+                // 廉价上界：所有可放雷格（T �?+ 活组件格）任�?M �?
                 const int M = board.totalMines - basic.mineSum;
                 int placeable = basic.unknownSum;
                 for (const auto& inst : structure.components)
                     if (inst.alive) placeable += static_cast<int>(inst.boxes.cells.size());
                 const ld coarse = comb(placeable, M);
                 if (coarse > 300000.0L || placeable < M) break;
-                // 统计方案数
+                // 统计方案�?
                 long long count = 0;
                 Distribution::Solver::all_distribute(
                     board, basic, structure, [&](const std::vector<CellId>&) { ++count; });
@@ -344,14 +285,12 @@ int main() {
                     });
                 Distribution::DistPool pool;
                 const Probability::Result prob = Exact::analyze(board, basic, structure, pool);
-                const Approx::Result ar = Approx::Analyzer::analyze(board, basic, structure, pool);
                 for (int x = 1; x <= board.rows; ++x)
                     for (int y = 1; y <= board.cols; ++y) {
                         if (board.board[x][y] != Cell::Hidden) continue;
                         cover(board, basic, structure, x, y);
                         const CellId c = board.id(x, y);
                         const auto r = Exact::observe(board, basic, structure, prob, pool, c);
-                        const auto ra = Approx::observe(board, basic, structure, pool, ar, c);
                         const Counts& ct = counts[static_cast<std::size_t>(c)];
                         char buf[160];
                         std::snprintf(buf, sizeof buf, "g t%02d s%02d (%d,%d) explosion", trial,
@@ -364,26 +303,6 @@ int main() {
                             check(std::abs(r.digit[static_cast<std::size_t>(k)] -
                                            static_cast<ld>(ct.digit[static_cast<std::size_t>(k)]) /
                                                ct.total) < 1e-9L, buf);
-                        }
-                        // Approx 分桶填充
-                        const ld exactE = static_cast<ld>(ct.explosion) / ct.total;
-                        const ld rhoRel =
-                            exactE > 1e-12L ? std::abs(ra.explosion - exactE) / exactE
-                                            : std::abs(ra.explosion - exactE);
-                        const int b = rhoBucket(rhoRel);
-                        ++gBucketCells[static_cast<std::size_t>(b)];
-                        const ld eErr = std::abs(ra.explosion - exactE);
-                        gBucketSumExpl[static_cast<std::size_t>(b)] += eErr;
-                        gBucketMaxExpl[static_cast<std::size_t>(b)] =
-                            (std::max)(gBucketMaxExpl[static_cast<std::size_t>(b)], eErr);
-                        for (int k = 0; k <= 8; ++k) {
-                            const ld dd = std::abs(ra.digit[static_cast<std::size_t>(k)] -
-                                                   static_cast<ld>(ct.digit[static_cast<std::size_t>(k)]) /
-                                                       ct.total);
-                            gBucketSumDigit[static_cast<std::size_t>(b)] += dd;
-                            gBucketMaxDigit[static_cast<std::size_t>(b)] =
-                                (std::max)(gBucketMaxDigit[static_cast<std::size_t>(b)], dd);
-                            ++gBucketChecks[static_cast<std::size_t>(b)];
                         }
                         ++gCells;
                     }
@@ -399,29 +318,9 @@ int main() {
         }
     }
 
-    std::printf("\nApprox 误差分桶（按 rho 初始相对误差分档）:\n");
-    std::printf("  rho误差档      格数   数字误差(平均/最大)  爆炸误差(平均/最大)\n");
-    static const char* kRhoBuckets[kRhoBucketCount] = {
-        "[0,0.5%) ", "[0.5,1%)", "[1,2%)  ", "[2,4%)  ",
-        "[4,8%)  ", "[8,16%) ", "[16,32%)", "[32%,∞) "};
-    for (int b = 0; b < kRhoBucketCount; ++b) {
-        const ld avgD = gBucketChecks[static_cast<std::size_t>(b)]
-                            ? gBucketSumDigit[static_cast<std::size_t>(b)] /
-                                  static_cast<ld>(gBucketChecks[static_cast<std::size_t>(b)])
-                            : 0.0L;
-        const ld avgE = gBucketCells[static_cast<std::size_t>(b)]
-                            ? gBucketSumExpl[static_cast<std::size_t>(b)] /
-                                  static_cast<ld>(gBucketCells[static_cast<std::size_t>(b)])
-                            : 0.0L;
-        std::printf("  %s %5lld   %.4f / %.4f     %.4f / %.4f\n", kRhoBuckets[b],
-                    gBucketCells[static_cast<std::size_t>(b)], (double)avgD,
-                    (double)gBucketMaxDigit[static_cast<std::size_t>(b)], (double)avgE,
-                    (double)gBucketMaxExpl[static_cast<std::size_t>(b)]);
-    }
-
-    std::printf("核对 %lld 格；共 %lld 项检查，失败 %d 项\n", gCells, gCheck, gFail);
-    std::printf("覆盖: T格=%lld box格=%lld size1box=%lld Safe格=%lld Mine标记格=%lld "
+    std::printf("核对 %lld 格；�?%lld 项检查，失败 %d 项\n", gCells, gCheck, gFail);
+    std::printf("覆盖: T�?%lld box�?%lld size1box=%lld Safe�?%lld Mine标记�?%lld "
                 "有Mine邻居=%lld 有T邻居=%lld\n",
                 covT, covBox, covSize1, covSafe, covMineCell, covFixed, covUT);
-    return gFail == 0 ? 0 : 1;
+    std::exit(gFail == 0 ? 0 : 1);
 }

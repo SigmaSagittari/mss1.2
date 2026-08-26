@@ -33,10 +33,10 @@
         <label>棋盘展示 <input id="opt-view" type="number" min="10" max="100" value="30"> 格</label>
       </div>
       <div class="submenu" id="sub-adv-panel" hidden>
-        <label>更新方法
+        <label>结构处理
           <select id="opt-analysis-mode">
-            <option value="incremental" selected>增量近似更新</option>
-            <option value="full">全局重建（精确）</option>
+            <option value="update" selected>增量更新</option>
+            <option value="rebuild">全量重建</option>
           </select>
         </label>
         <label>随机种子 <input id="opt-seed" type="number" min="0" value="0"></label>

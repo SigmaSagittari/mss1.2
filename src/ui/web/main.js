@@ -32,7 +32,7 @@ const settings = {
   edgeHighlight: true,  // 0% 绿 / 100% 红 醒目标记（代替文字）
   cellPx: 24,   // 格子边长（正方形），可在设置里手动调整
   viewCells: 30,  // 棋盘展示窗口大小（格），超出后棋盘区域滚动
-  analysisMode: "incremental",  // full = 全局重建；incremental = 增量更新（默认）
+  structMode: "update",  // update = 结构增量更新（默认）；rebuild = 结构全量重建
   debugDump: false,  // 控制台输出调试信息（默认关闭）
 };
 
@@ -103,9 +103,6 @@ async function newGame(rows, cols, mines, seed) {
   resetAnalyzer();
   // seed 缺省 = 随机：服务端生成新随机种子并回填到设置里；给定了就用指定种子
   const body = seed === undefined ? { rows, cols, mines } : { rows, cols, mines, seed };
-  // 携带当前引擎模式（增量近似更新 / 全局重建），新局沿用
-  const modeEl = document.getElementById("opt-analysis-mode");
-  if (modeEl) body.mode = modeEl.value;
   state = await postOp("/api/new", body);
   prob = null;
   resetTimer();
@@ -565,9 +562,9 @@ document.getElementById("opt-edge").addEventListener("change", (e) => {
 });
 
 document.getElementById("opt-analysis-mode").addEventListener("change", async (e) => {
-  settings.analysisMode = e.target.value === "incremental" ? "incremental" : "full";
+  settings.structMode = e.target.value === "rebuild" ? "rebuild" : "update";
   try {
-    await post("/api/config", { mode: settings.analysisMode });
+    await post("/api/config", { structMode: settings.structMode });
   } catch (_) { /* 忽略瞬时错误，下次请求会重新同步 */ }
 });
 
@@ -620,12 +617,12 @@ const optView = document.getElementById("opt-view");
 settings.viewCells = parseInt(optView.value, 10) || 30;
 applyViewVars();
 
-// 初始化：与服务器同步分析模式设置
+// 初始化：与服务器同步结构处理方式设置
 async function loadConfig() {
   try {
     const cfg = await api("/api/config");
-    settings.analysisMode = cfg.mode === "incremental" ? "incremental" : "full";
-    document.getElementById("opt-analysis-mode").value = settings.analysisMode;
+    settings.structMode = cfg.structMode === "rebuild" ? "rebuild" : "update";
+    document.getElementById("opt-analysis-mode").value = settings.structMode;
   } catch (_) { /* 服务器未就绪时保持默认 */ }
 }
 

@@ -13,16 +13,15 @@ namespace mss {
 // probability.h — 概率引擎的共享数据类。
 //
 // 只定义"查询视图"，不含任何算法：
-//   - Result：精确/近似引擎共同的生产物，小（按块），非 O(nm) 网格。
+//   - Result：精确引擎的生产物，小（按块），非 O(nm) 网格。
 //   - ComponentResult：单连通块的小结果（每 BoxId 的雷概率）。
 //   - mineProbability：getter，单格查询，只读。
 //   - ObserveResult：observe 引擎的产物——点开某格后的结果分布。
 //
-// 引擎各自独立成文件：
-//   analysis/probability/exact.h   → Exact（GF 多项式 + binomial）
-//   analysis/probability/approx.h  → Approx（solveRho + rho 加权）
-// 两者都填同一份 Result / ObserveResult（boxProbs/来源不同），
-// UI 无需区分引擎。整盘网格物化（ProbabilityGrid）归 UI 适配器。
+// 引擎实现：
+//   analysis/probability/exact.h → Exact（GF 多项式 + binomial）
+// 填 Result / ObserveResult（boxProbs/来源），UI 无需区分引擎。
+// 整盘网格物化（ProbabilityGrid）归 UI 适配器。
 // ─────────────────────────────────────────────────────────────
 
 struct Probability {
