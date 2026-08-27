@@ -43,6 +43,9 @@
     <ClCompile Include="test\observe_exact_test.cpp">
       <Filter>test</Filter>
     </ClCompile>
+    <ClCompile Include="test\search_timing_test.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="analysis\basic.h">
@@ -101,6 +104,9 @@
     </ClInclude>
     <ClInclude Include="analysis\probability.h">
       <Filter>analysis\probability</Filter>
+    </ClInclude>
+    <ClInclude Include="analysis\search\midgame_search.h">
+      <Filter>analysis\bruteforce</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

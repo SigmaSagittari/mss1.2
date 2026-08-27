@@ -157,3 +157,88 @@ button.active { background: #a8a8a8; font-weight: bold; }
   line-height: 1.5;
   color: #000;
 }
+/* 分析搜索树：局部可折叠，避免一次性撑爆屏幕 */
+#analyze-tree {
+  margin-top: 8px;
+  border-top: 1px solid #808080;
+  padding-top: 4px;
+}
+.tree-toolbar {
+  display: flex;
+  gap: 4px;
+  padding: 4px 6px;
+}
+#tree-content {
+  max-height: 240px;
+  overflow: auto;
+  padding: 4px 6px;
+  font-family: "Courier New", "Microsoft YaHei", monospace;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.tree-node {
+  font-weight: bold;
+  margin-bottom: 4px;
+}
+.tree-action {
+  margin: 4px 0 2px 4px;
+}
+.tree-branch {
+  margin-left: 12px;
+}
+.tree-nav {
+  font-size: 11px;
+  padding: 1px 6px;
+}
+.tree-meta {
+  color: #444;
+}
+
+/* 右侧树快照区域：给足空间，避免挤成一团 */
+.detail-panel {
+  width: 320px;
+  min-width: 260px;
+  max-width: min(600px, 75vw);
+}
+#analyze-tree {
+  margin-top: 10px;
+  border-top: 1px solid #808080;
+  padding-top: 6px;
+}
+.tree-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px;
+}
+#tree-content {
+  min-height: 180px;
+  max-height: 420px;
+  overflow: auto;
+  padding: 8px;
+  font-family: "Courier New", "Microsoft YaHei", monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  background: #e8e8e8;
+  border: 1px solid #a0a0a0;
+}
+.tree-head {
+  font-weight: bold;
+  margin-bottom: 6px;
+}
+.tree-action {
+  margin: 6px 0 2px 2px;
+  padding: 2px 4px;
+  background: #f0f0f0;
+  border-left: 3px solid #808080;
+}
+.tree-branch {
+  margin: 2px 0 2px 14px;
+}
+.tree-nav, .tree-toolbar button {
+  font-size: 12px;
+  padding: 2px 8px;
+}
+.tree-meta {
+  color: #555;
+}

@@ -7,16 +7,22 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <iterator>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -38,6 +44,7 @@ namespace mss {
 class UiApp {
 public:
     explicit UiApp(int port = 18080) : port_(port) {}
+    ~UiApp() { stopSearch(); }
 
     int run() {
         server_.setHandler([this](const HttpRequest& req) { return handle(req); });
@@ -76,7 +83,12 @@ private:
         if (p == "/api/detail") return jsonDetail(req);
         if (p == "/api/analyzer" && req.method == "POST") return jsonAnalyzer(req);
         if (p == "/api/edit" && req.method == "POST") return jsonEdit(req);
-        if (p == "/api/analyze" && req.method == "POST") return jsonAnalyze(req);
+        if (p == "/api/analyze" && req.method == "POST") return jsonAnalyzeStart(req);
+        if (p == "/api/analyze/start" && req.method == "POST") return jsonAnalyzeStart(req);
+        if (p == "/api/analyze/stop" && req.method == "POST") return jsonAnalyzeStop();
+        if (p == "/api/analyze/status") return jsonAnalyzeStatus();
+        if (p == "/api/analyze/tree") return jsonAnalyzeTree(req);
+        if (p == "/api/analyze/moves") return jsonAnalyzeMoves();
         if (p == "/api/config") {
             if (req.method == "POST") return jsonConfig(req);
             return jsonConfigGet();
@@ -237,6 +249,7 @@ private:
         // 新局丢弃分析会话（编辑快照/分析态随旧局失效）。
         editSaved_.reset();
         analyzerActive_ = false;
+        stopSearch();
         return jsonState();
     }
 
@@ -378,9 +391,13 @@ private:
             if (!analyzerActive_) editSaved_ = std::make_unique<ObservedBoard>(state);
             analyzerActive_ = true;
         } else {
-            if (analyzerActive_ && editSaved_) state = std::move(*editSaved_);
+            if (analyzerActive_ && editSaved_) {
+                state = std::move(*editSaved_);
+                game_->analysis().initFromState();
+            }
             editSaved_.reset();
             analyzerActive_ = false;
+            stopSearch();
         }
         return json("{\"ok\":true}");
     }
@@ -392,8 +409,12 @@ private:
         const int y = bodyInt(req.body, "y");
         const int v = bodyInt(req.body, "v");
         auto& state = game_->analysis().state();
-        if (x >= 1 && x <= state.rows && y >= 1 && y <= state.cols && v >= 0 && v <= 9)
+        if (x >= 1 && x <= state.rows && y >= 1 && y <= state.cols && v >= 0 && v <= 9) {
             state.board[x][y] = (v == 9) ? Cell::Hidden : static_cast<Cell>(v);
+            // 编辑直接改分析视图，必须重建 basic/structure/probability，
+            // 否则 /api/probability 返回的是编辑前的旧概率。
+            game_->analysis().initFromState();
+        }
         return json("{\"ok\":true}");
     }
 
@@ -415,62 +436,429 @@ private:
         return os.str();
     }
 
-    HttpResponse jsonAnalyze(const HttpRequest& req) {
+    // ---------- 后台分析线程 ----------
+    struct AnalysisSnapshot {
+        bool valid = false;
+        bool running = false;
+        bool midgame = false;
+        bool bruteforce = false;
+        std::string reason;
+        std::string candidates;
+        int firstX = 0, firstY = 0;
+        int depth = 0, nodes = 0, observes = 0;
+        int total = 0, wins = 0, ms = 0;
+        long long totalMs = 0;
+        long long memLimit = 0;   // 树内存上限（字节），0 = 未设
+        double value = 0;
+        double winRate = 0;
+        double nodeRate = 0;
+        double tProb = 0;
+    };
+
+    AnalysisSnapshot snapshotFromSession(const MidgameSearch::Session& s, bool running) {
+        AnalysisSnapshot snap;
+        snap.valid = s.valid;
+        snap.running = running;
+        snap.reason = s.reason;
+        snap.candidates = formatCount(s.prob.candidates);
+        snap.tProb = static_cast<double>(s.prob.tCellProbability);
+        snap.memLimit = s.config.maxMemBytes;
+        if (!s.valid) return snap;
+        const bool brute = s.prob.candidates <= static_cast<long double>(kMaxBruteforceCount);
+        snap.bruteforce = brute;
+        snap.midgame = !brute;
+        if (!brute) {
+            const MidgameSearch::Answer ans = MidgameSearch::getAnswer(s.tree);
+            snap.firstX = ans.x;
+            snap.firstY = ans.y;
+            snap.depth = ans.depth;
+            snap.nodes = ans.nodes;
+            snap.observes = ans.observes;
+            snap.value = static_cast<double>(ans.value);
+        }
+        return snap;
+    }
+
+    void dumpTreeLog(const MidgameSearch::Tree& t) {
+        std::ofstream log("search_tree_1000.log", std::ios::trunc);
+        if (log) MidgameSearch::dumpTree(t, log, 4, 300);
+    }
+
+    void searchLoop() {
+        for (;;) {
+            AnalysisSnapshot snap;
+            bool noProgress = false;
+            bool brute = false;
+            MidgameSearch::Session* sessionPtr = nullptr;
+            bool midgame = false;
+            {
+                std::unique_lock lk(searchMutex_);
+                if (searchStop_ || !searchSession_) break;
+                sessionPtr = searchSession_.get();
+                MidgameSearch::Session& s = *sessionPtr;
+                brute = s.prob.candidates <= static_cast<long double>(kMaxBruteforceCount);
+                midgame = !brute;
+            }
+            if (midgame) {
+                const auto t0 = std::chrono::steady_clock::now();
+                int before = 0;
+                {
+                    std::lock_guard lk(searchMutex_);
+                    before = sessionPtr->tree.statsNodes;
+                }
+                int lastAfter = before;
+                constexpr int kChunkNodes = 4;
+                while (lastAfter - before < kChunkNodes) {
+                    {
+                        std::unique_lock lk(searchMutex_);
+                        if (searchStop_ || !searchSession_) break;
+                        MidgameSearch::Session& s = *sessionPtr;
+                        const int beforeOne = lastAfter;
+                        MidgameSearch::grow(s, 1);
+                        lastAfter = s.tree.statsNodes;
+                        if (lastAfter == beforeOne) break;
+                        if (!searchTreeLogged_ && s.tree.statsNodes >= 1000) {
+                            searchTreeLogged_ = true;
+                            dumpTreeLog(s.tree);
+                        }
+                    }
+                }
+                const auto t1 = std::chrono::steady_clock::now();
+                MidgameSearch::Session& s = *sessionPtr;
+                snap = snapshotFromSession(s, true);
+                const int chunkMs = static_cast<int>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
+                snap.ms = chunkMs;
+                searchTotalMs_ += chunkMs;
+                snap.totalMs = searchTotalMs_;
+                const auto rateNow = std::chrono::steady_clock::now();
+                rateSamples_.push_back({rateNow, s.tree.statsNodes});
+                while (!rateSamples_.empty() &&
+                       rateNow - rateSamples_.front().first > std::chrono::seconds(3))
+                    rateSamples_.pop_front();
+                if (rateSamples_.size() >= 2) {
+                    const double dt =
+                        std::chrono::duration<double>(rateNow - rateSamples_.front().first).count();
+                    const double dn = static_cast<double>(
+                        s.tree.statsNodes - rateSamples_.front().second);
+                    if (dt > 0) snap.nodeRate = dn / dt;
+                }
+                if (lastAfter == before) noProgress = true;
+            }
+
+            if (brute) {
+                MidgameSearch::Session& s = *sessionPtr;
+                const auto t0 = std::chrono::steady_clock::now();
+                Grid<long double> grid = Interactive::materializeProbability(s);
+                const EndgameBruteforce::Result r = EndgameBruteforce::solveEndgame(
+                    s.board, s.basic, s.structure, s.pool, grid);
+                const auto t1 = std::chrono::steady_clock::now();
+                snap = snapshotFromSession(s, false);
+                snap.bruteforce = true;
+                snap.midgame = false;
+                if (!r.result.empty()) {
+                    snap.firstX = r.result[0].x;
+                    snap.firstY = r.result[0].y;
+                    snap.wins = r.result[0].wins;
+                }
+                snap.total = r.totalPossibilities;
+                snap.nodes = static_cast<int>(r.nodes);
+                snap.winRate = r.totalPossibilities > 0
+                                   ? static_cast<double>(r.result.empty() ? 0 : r.result[0].wins) /
+                                         r.totalPossibilities * 100.0
+                                   : 0.0;
+                snap.ms = static_cast<int>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
+                snap.totalMs = snap.ms;
+                {
+                    std::lock_guard lk(searchMutex_);
+                    if (searchStop_) break;
+                }
+                noProgress = true;
+            }
+
+            {
+                std::lock_guard lk(snapMutex_);
+                searchSnap_ = snap;
+            }
+            if (noProgress) {
+                std::lock_guard lk(searchMutex_);
+                searchRunning_ = false;
+                snap.running = false;
+                std::lock_guard sl(snapMutex_);
+                searchSnap_ = snap;
+                break;
+            }
+        }
+    }
+    void startSearch() {
+        stopSearch();
+        std::lock_guard lk(searchMutex_);
+        searchStop_ = false;
+        searchRunning_ = false;
+        searchTreeLogged_ = false;
+        searchTotalMs_ = 0;
+        rateSamples_.clear();
+        searchSession_ = std::make_unique<MidgameSearch::Session>();
+        if (memLimitMbOverride_ > 0) {
+            searchSession_->config.maxMemBytes =
+                static_cast<long long>(memLimitMbOverride_) * 1024LL * 1024LL;
+        }
         const ObservedBoard& state = game_->analysis().state();
-        // anytime 会话：盘面没变就继续生长，变了才重建。
-        if (!search_ || !MidgameSearch::matches(*search_, state)) {
-            search_ = std::make_unique<MidgameSearch::Session>();
-            MidgameSearch::build(*search_, state);
+        if (!MidgameSearch::build(*searchSession_, state)) {
+            AnalysisSnapshot snap;
+            snap.valid = false;
+            snap.reason = searchSession_->reason;
+            snap.candidates = "0";
+            {
+                std::lock_guard sl(snapMutex_);
+                searchSnap_ = snap;
+            }
+            searchSession_.reset();
+            return;
         }
-        const MidgameSearch::Session& s = *search_;
-        if (!s.valid)
-            return json("{\"valid\":false,\"reason\":" + jsonString(s.reason) + "}");
-        const Grid<long double> grid = Interactive::materializeProbability(s);
-        const long double tProb = s.prob.tCellProbability;
-        if (s.prob.candidates <= static_cast<long double>(kMaxBruteforceCount)) {
-            const auto t0 = std::chrono::steady_clock::now();
-            const EndgameBruteforce::Result r = EndgameBruteforce::solveEndgame(
-                s.board, s.basic, s.structure, search_->pool, grid);
-            const auto t1 = std::chrono::steady_clock::now();
-            const long long ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-            const auto& mv = r.result[0];
-            const int total = r.totalPossibilities;
-            const double winRate =
-                total > 0 ? static_cast<double>(mv.wins) / total * 100.0 : 0.0;
-            std::ostringstream os;
-            os << std::setprecision(6);
-            os << "{\"valid\":true,\"bruteforce\":true"
-               << ",\"candidates\":\"" << formatCount(s.prob.candidates) << "\""
-               << ",\"total\":" << total
-               << ",\"firstMove\":[" << mv.x << "," << mv.y << "]"
-               << ",\"wins\":" << mv.wins << ",\"winRate\":" << winRate
-               << ",\"nodes\":" << r.nodes << ",\"ms\":" << ms
-               << gridJson(grid, tProb) << "}";
-            return json(os.str());
+        searchRunning_ = true;
+        AnalysisSnapshot snap = snapshotFromSession(*searchSession_, true);
+        {
+            std::lock_guard sl(snapMutex_);
+            searchSnap_ = snap;
         }
-        const auto t0 = std::chrono::steady_clock::now();
-        // UI 可按上次实测耗时自适应给预算（默认 = 配置值）。
-        const int budget = bodyInt(req.body, "budget");
-        MidgameSearch::grow(*search_, budget > 0 ? budget : search_->config.nodeBudget);
-        const auto t1 = std::chrono::steady_clock::now();
-        const long long ms =
-            std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-        const MidgameSearch::Answer ans = MidgameSearch::getAnswer(search_->tree);
+        searchThread_ = std::thread([this] { searchLoop(); });
+    }
+
+    void stopSearch() {
+        std::thread t;
+        {
+            std::lock_guard lk(searchMutex_);
+            searchStop_ = true;
+            t = std::move(searchThread_);
+        }
+        if (t.joinable()) t.join();
+        std::lock_guard lk(searchMutex_);
+        searchRunning_ = false;
+        searchSession_.reset();
+        searchStop_ = false;
+        { std::lock_guard sl(snapMutex_); searchSnap_.running = false; }
+    }
+
+    static std::string buildTreeNodeJson(const MidgameSearch::Tree& t, int nodeId,
+                                         std::size_t maxActions = 200) {
+        const MidgameSearch::Node& n = t.nodes[static_cast<std::size_t>(nodeId)];
         std::ostringstream os;
         os << std::setprecision(6);
-        os << "{\"valid\":true,\"midgame\":true"
-           << ",\"candidates\":\"" << formatCount(s.prob.candidates) << "\""
-           << ",\"firstMove\":[" << ans.x << "," << ans.y << "]"
-           << ",\"searchDepth\":" << ans.depth
-           << ",\"searchNodes\":" << ans.nodes
-           << ",\"searchObserves\":" << ans.observes
-           << ",\"value\":" << static_cast<double>(ans.value)
-           << ",\"ms\":" << ms
-           << gridJson(grid, tProb) << "}";
+        os << "{\"id\":" << nodeId
+           << ",\"parent\":" << n.parent
+           << ",\"depth\":" << n.depth
+           << ",\"cell\":" << n.cell
+           << ",\"digit\":" << n.digit
+           << ",\"value\":" << static_cast<double>(n.value)
+           << ",\"dacc\":" << static_cast<double>(n.dacc)
+           << ",\"tLocal\":" << static_cast<double>(n.tLocal)
+           << ",\"t\":" << static_cast<double>(n.t)
+           << ",\"C\":" << static_cast<double>(n.C)
+           << ",\"expanded\":" << (n.expanded ? "true" : "false")
+           << ",\"nodes\":" << t.statsNodes
+           << ",\"actions\":[";
+        std::vector<std::size_t> order(n.actions.size());
+        for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+        std::sort(order.begin(), order.end(), [&](std::size_t lhs, std::size_t rhs) {
+            const double sl = lhs < n.score.size() ? static_cast<double>(n.score[lhs]) : 0.0;
+            const double sr = rhs < n.score.size() ? static_cast<double>(n.score[rhs]) : 0.0;
+            if (sl != sr) return sl > sr;
+            const double pl = static_cast<double>(n.actions[lhs].p);
+            const double pr = static_cast<double>(n.actions[rhs].p);
+            if (pl != pr) return pl < pr;
+            return lhs < rhs;
+        });
+        for (std::size_t oi = 0; oi < order.size() && oi < maxActions; ++oi) {
+            const std::size_t i = order[oi];
+            if (oi > 0) os << ',';
+            const MidgameSearch::Action& a = n.actions[i];
+            const int x = a.cell / (t.cols + 1);
+            const int y = a.cell % (t.cols + 1);
+            const double r = i < n.r.size() ? static_cast<double>(n.r[i]) : 0.0;
+            const double score = i < n.score.size() ? static_cast<double>(n.score[i]) : 0.0;
+            os << "{\"cell\":" << a.cell
+               << ",\"x\":" << x
+               << ",\"y\":" << y
+               << ",\"p\":" << static_cast<double>(a.p)
+               << ",\"mult\":" << static_cast<double>(a.mult)
+               << ",\"r\":" << r
+               << ",\"score\":" << score
+               << ",\"branches\":[";
+            bool firstBranch = true;
+            const std::array<double, 9>* dg = MidgameSearch::digitOf(n, a);
+            if (dg) {
+                for (int k = 0; k <= 8; ++k) {
+                    if ((*dg)[static_cast<std::size_t>(k)] <= 0.0L) continue;
+                    if (!firstBranch) os << ',';
+                    firstBranch = false;
+                    const int c = MidgameSearch::branchOf(n, static_cast<int>(i), k);
+                    const char* state = c == MidgameSearch::kUnexp    ? "unexpanded"
+                                        : c == MidgameSearch::kDominated ? "dominated"
+                                                                         : "node";
+                    double val = 0.0, ct = 0.0, cc = 0.0;
+                    if (c >= 0) {
+                        const MidgameSearch::Node& cn = t.nodes[static_cast<std::size_t>(c)];
+                        val = static_cast<double>(cn.value);
+                        ct = static_cast<double>(cn.t);
+                        cc = static_cast<double>(cn.C);
+                    }
+                    os << "{\"digit\":" << k
+                       << ",\"prob\":" << static_cast<double>((*dg)[static_cast<std::size_t>(k)])
+                       << ",\"state\":\"" << state
+                       << "\",\"child\":" << c
+                         << ",\"childNodes\":" << (c >= 0 && static_cast<std::size_t>(c) < t.subtreeNodes.size() ? t.subtreeNodes[static_cast<std::size_t>(c)] : 0)
+                       << ",\"value\":" << val
+                       << ",\"t\":" << ct
+                       << ",\"C\":" << cc << "}";
+                }
+            }
+            os << "]}";
+        }
+        if (n.actions.size() > maxActions) os << "],\"actionsTruncated\":true}";
+        else os << "]}";
+        return os.str();
+    }
+
+
+    HttpResponse jsonAnalyzeStart(const HttpRequest& req) {
+        if (!analyzerActive_) return json("{\"ok\":false,\"reason\":\"not in analyzer mode\"}");
+        // 可选设置：?memLimit=MB 覆盖搜索树内存上限（0 = 用默认）。
+        const int mb = queryInt(req, "memLimit", 0);
+        if (mb > 0) memLimitMbOverride_ = mb;
+        startSearch();
+        return jsonAnalyzeStatus();
+    }
+
+    HttpResponse jsonAnalyzeStop() {
+        stopSearch();
+        return json("{\"ok\":true}");
+    }
+
+    HttpResponse jsonAnalyzeStatus() {
+        AnalysisSnapshot snap;
+        {
+            std::lock_guard lk(snapMutex_);
+            snap = searchSnap_;
+        }
+        std::ostringstream os;
+        os << std::setprecision(6);
+        os << "{\"valid\":" << (snap.valid ? "true" : "false")
+           << ",\"running\":" << (snap.running ? "true" : "false")
+           << ",\"reason\":" << jsonString(snap.reason)
+           << ",\"candidates\":" << jsonString(snap.candidates);
+        if (snap.midgame) os << ",\"midgame\":true";
+        if (snap.bruteforce) os << ",\"bruteforce\":true";
+        if (snap.firstX > 0) os << ",\"firstMove\":[" << snap.firstX << "," << snap.firstY << "]";
+        os << ",\"searchDepth\":" << snap.depth
+           << ",\"searchNodes\":" << snap.nodes
+           << ",\"searchObserves\":" << snap.observes
+           << ",\"value\":" << snap.value
+           << ",\"total\":" << snap.total
+           << ",\"wins\":" << snap.wins
+           << ",\"winRate\":" << snap.winRate
+           << ",\"ms\":" << snap.ms
+             << ",\"nodeRate\":" << snap.nodeRate
+             << ",\"totalMs\":" << snap.totalMs
+             << ",\"memLimit\":" << snap.memLimit
+           << ",\"tProb\":" << snap.tProb
+           << "}";
         return json(os.str());
     }
 
+    HttpResponse jsonAnalyzeTree(const HttpRequest& req) {
+        const int nodeId = queryInt(req, "node", 0);
+        std::lock_guard lk(searchMutex_);
+        if (!searchSession_ || !searchSession_->valid) {
+            return json("{\"error\":\"no search session\"}");
+        }
+        const MidgameSearch::Tree& t = searchSession_->tree;
+        if (nodeId < 0 || nodeId >= static_cast<int>(t.nodes.size())) {
+            return json("{\"error\":\"bad node id\"}");
+        }
+        return json(buildTreeNodeJson(t, nodeId));
+    }
+
+    // 全量候选招法的棋盘标注数据：质量（存活概率）/ 争议度（搜索树 tLocal）/ 子树节点数。
+    // 供棋盘"招法质量"显示（替换概率），一次性返回根节点所有候选，不截断。
+    HttpResponse jsonAnalyzeMoves() {
+        std::lock_guard lk(searchMutex_);
+        if (!searchSession_ || !searchSession_->valid)
+            return json("{\"error\":\"no search session\"}");
+        const MidgameSearch::Tree& t = searchSession_->tree;
+        const MidgameSearch::Node& root = t.nodes[0];
+        if (!root.expanded) return json("{\"moves\":[]}");
+        const std::size_t na = root.actions.size();
+
+        std::vector<long double> v(na, 0.0L);
+        for (std::size_t i = 0; i < na; ++i) {
+            const MidgameSearch::Action& a = root.actions[i];
+            long double av = a.p;   // 爆炸分支贡献 p×1
+            const std::array<double, 9>* d = MidgameSearch::digitOf(root, a);
+            if (!d) {
+                const long double L = 1.0L - (1.0L - root.dacc) * (1.0L - a.p);
+                av = a.p + (1.0L - a.p) * L;
+            } else {
+                for (int k = 0; k <= 8; ++k) {
+                    const double dk = (*d)[static_cast<std::size_t>(k)];
+                    if (dk <= 0.0) continue;
+                    const int c = MidgameSearch::branchOf(root, static_cast<int>(i), k);
+                    long double cv;
+                    if (c == MidgameSearch::kDominated)
+                        cv = 1.0L;
+                    else if (c == MidgameSearch::kUnexp)
+                        cv = 1.0L - (1.0L - root.dacc) * (1.0L - a.p);
+                    else
+                        cv = t.nodes[static_cast<std::size_t>(c)].value;
+                    av += dk * cv;
+                }
+            }
+            v[i] = av;
+        }
+
+        std::ostringstream os;
+        os << std::setprecision(6);
+        os << "{\"moves\":[";
+        for (std::size_t i = 0; i < na; ++i) {
+            const MidgameSearch::Action& a = root.actions[i];
+            if (i > 0) os << ',';
+            int nodes = 0;
+            for (int k = 0; k <= 8; ++k) {
+                const int c = MidgameSearch::branchOf(root, static_cast<int>(i), k);
+                if (c >= 0) nodes += t.subtreeNodes[static_cast<std::size_t>(c)];
+            }
+            // 该格子争议度 = 点开它之后各 digit 分支局面的链式争议 t 按 observe 加权：
+            //   tO = Σ digit_k × t(子_k)；未展开局面 t 按 1（未知=最大争议），
+            //   被支配局面 t 按 0（已判定无需再探）。
+            // 与搜索树 refreshNode 里 score = r × cO × tO / mult 用的同一个 tO。
+            long double tO = 0.0L;
+            const std::array<double, 9>* dg = MidgameSearch::digitOf(root, a);
+            if (!dg) {
+                tO = 1.0L - static_cast<long double>(a.p);   // 全未观察：Σdigit×1 = 1-p
+            } else {
+                for (int k = 0; k <= 8; ++k) {
+                    const double dk = (*dg)[static_cast<std::size_t>(k)];
+                    if (dk <= 0.0) continue;
+                    const int c = MidgameSearch::branchOf(root, static_cast<int>(i), k);
+                    if (c == MidgameSearch::kDominated) continue;
+                    if (c == MidgameSearch::kUnexp) {
+                        tO += dk;
+                    } else {
+                        tO += dk * t.nodes[static_cast<std::size_t>(c)].t;
+                    }
+                }
+            }
+            const auto [x, y] =
+                std::pair<int, int>{a.cell / (t.cols + 1), a.cell % (t.cols + 1)};
+            os << "{\"cell\":" << a.cell << ",\"x\":" << x << ",\"y\":" << y
+               << ",\"qual\":" << static_cast<double>(1.0L - v[i])
+               << ",\"tO\":" << static_cast<double>(tO)
+               << ",\"nodes\":" << nodes << "}";
+        }
+        os << "]}";
+        return json(os.str());
+    }
     void openBrowser() const {
         std::string url = "http://127.0.0.1:" + std::to_string(port_) + "/";
         ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
@@ -490,10 +878,21 @@ private:
     HttpServer server_;
     std::unique_ptr<GameController> game_;
     std::unique_ptr<ObservedBoard> editSaved_;  // 分析模式进入时的盘面快照（退出还原）
-    std::unique_ptr<MidgameSearch::Session> search_;  // anytime 中盘搜索会话（盘面变了自动重建）
+    std::unique_ptr<MidgameSearch::Session> searchSession_;  // 后台分析线程专用（受 searchMutex_ 保护）
+    std::thread searchThread_;
+    std::mutex searchMutex_;
+    std::mutex snapMutex_;
+    std::condition_variable searchCv_;
+    bool searchStop_ = false;
+    bool searchRunning_ = false;
+    bool searchTreeLogged_ = false;
+    long long searchTotalMs_ = 0;
+    std::deque<std::pair<std::chrono::steady_clock::time_point, long long>> rateSamples_;
+    AnalysisSnapshot searchSnap_;
     bool analyzerActive_ = false;
     int port_ = 18080;
     int computedMs_ = 0;
+    int memLimitMbOverride_ = 0;  // /api/analyze/start?memLimit= 设置的搜索内存上限（MB），0 = 用默认
 };
 
 }  // namespace mss

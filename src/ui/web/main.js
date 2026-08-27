@@ -17,6 +17,7 @@ const NUMBER_COLORS = [
 
 let state = null;
 let prob = null;
+let analysisBest = null;  // 分析模式最优首招高亮（1-based）
 let hover = null;       // {x, y} 1-based
 let pressing = false;   // 左键按下中
 let currentMode = "beg";
@@ -28,13 +29,18 @@ let prevEffects = new Set();    // 当前已绘制的按压效果格子（一维
 
 const settings = {
   prob: false,
+  moves: false,   // 招法质量标注（取代概率）：质量/不稳定度/搜索节点数
   pressPreview: true,
   edgeHighlight: true,  // 0% 绿 / 100% 红 醒目标记（代替文字）
   cellPx: 24,   // 格子边长（正方形），可在设置里手动调整
   viewCells: 30,  // 棋盘展示窗口大小（格），超出后棋盘区域滚动
   structMode: "update",  // update = 结构增量更新（默认）；rebuild = 结构全量重建
   debugDump: false,  // 控制台输出调试信息（默认关闭）
+  memLimitMb: 1024,  // 后台搜索树内存上限（MB）
 };
+
+let moves = null;   // 招法质量标注数据（/api/analyze/moves 结果：cell -> {qual, tO, nodes}）
+let movesMap = {};  // cellId -> 标注对象
 
 // 画布布局：格子始终为 cellPx × cellPx 的正方形，
 // 棋盘尺寸 = cols×cellPx × rows×cellPx，随难度与设置动态伸缩
@@ -249,20 +255,25 @@ function drawCell(i, j) {
       if (v === -4) {  // 引爆点红底
         ctx.fillStyle = "#ff0000";
         ctx.fillRect(px, py, cell, cell);
-      }
+    }
       drawMine(px, py);
     }
   }
 
   // 概率显示（只画在未翻开的格子上；预览态不叠加）
-  if (!preview && settings.prob && prob && (v === -1 || v === -2)) {
-    const p = prob.prob[i][j];
-    if (settings.edgeHighlight && p <= 0)
-      drawEdgeMark(px, py, "#00b050");   // 安全：醒目绿
-    else if (settings.edgeHighlight && p >= 1)
-      drawEdgeMark(px, py, "#e00000");   // 雷：醒目红
-    else if (p > 0)
-      drawProbText(px, py, p);           // 中间概率：百分比文字
+  if (!preview && (v === -1 || v === -2)) {
+    const mv = movesMap[(i + 1) * (state.cols + 1) + (j + 1)];
+    if (settings.moves && mv) {
+      drawMovesText(px, py, mv);   // 招法质量标注（取代概率）
+    } else if (settings.prob && prob) {
+      const p = prob.prob[i][j];
+      if (settings.edgeHighlight && p <= 0)
+        drawEdgeMark(px, py, "#00b050");   // 安全：醒目绿
+      else if (settings.edgeHighlight && p >= 1)
+        drawEdgeMark(px, py, "#e00000");   // 雷：醒目红
+      else if (p > 0)
+        drawProbText(px, py, p);           // 中间概率：百分比文字
+    }
   }
 
   // 分析模式：悬停格画蓝框，标明「悬停 + 按数字键」会改哪格
@@ -271,6 +282,14 @@ function drawCell(i, j) {
     ctx.strokeStyle = "#0000ff";
     ctx.strokeRect(px + 1, py + 1, cell - 2, cell - 2);
   }
+
+    // 分析模式：最优首招高亮金色粗框
+    if (analyzer && analysisBest && analysisBest.x === i + 1 && analysisBest.y === j + 1 &&
+        (v === -1 || v === -2)) {
+      ctx.lineWidth = Math.max(3, Math.round(cell * 0.12));
+      ctx.strokeStyle = "#ffb000";
+      ctx.strokeRect(px + 1.5, py + 1.5, cell - 3, cell - 3);
+    }
 
   ctx.restore();
 }
@@ -283,6 +302,21 @@ function drawProbText(px, py, p) {
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(text, px + cell / 2, py + cell / 2 + 1);
+}
+
+// 招法质量标注（围棋风格，取代概率）：第一行质量（存活概率%），第二行该格争议度
+// （点开后各局面争议 t 的 observe 加权 tO），第三行该招法子树搜索节点数。
+function drawMovesText(px, py, mv) {
+  const fs = Math.max(8, Math.round(cell * 0.22));
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "rgba(0,0,0,0.8)";
+  ctx.font = "bold " + fs + "px 'Courier New'";
+  ctx.fillText((mv.qual * 100).toFixed(0) + "%", px + cell / 2, py + cell * 0.26);
+  ctx.font = (fs - 1) + "px 'Courier New'";
+  ctx.fillStyle = "rgba(0,0,0,0.6)";
+  ctx.fillText(mv.tO.toFixed(2), px + cell / 2, py + cell * 0.55);
+  ctx.fillText(String(mv.nodes), px + cell / 2, py + cell * 0.84);
 }
 
 function drawEdgeMark(px, py, color) {
@@ -361,7 +395,7 @@ function pressEffects() {
         if (ni >= 0 && ni < state.rows && nj >= 0 && nj < state.cols &&
             state.board[ni][nj] === -1)
           add(ni, nj);
-      }
+    }
   }
   return cells;
 }
@@ -556,6 +590,11 @@ document.getElementById("opt-press").addEventListener("change", (e) => {
   render();
 });
 
+document.getElementById("opt-moves").addEventListener("change", (e) => {
+  settings.moves = e.target.checked;
+  render();
+});
+
 document.getElementById("opt-edge").addEventListener("change", (e) => {
   settings.edgeHighlight = e.target.checked;
   render();
@@ -590,6 +629,13 @@ document.getElementById("opt-view").addEventListener("change", (e) => {
   applyViewVars();
 });
 
+// 搜索树内存上限（MB）：只影响后台分析搜索的封顶，改后下次「开始分析」生效。
+document.getElementById("opt-mem").addEventListener("change", (e) => {
+  const v = parseInt(e.target.value, 10);
+  settings.memLimitMb = isNaN(v) ? 1024 : Math.max(64, Math.min(32768, v));
+  e.target.value = settings.memLimitMb;
+});
+
 // 设置二级菜单：界面 / 高级
 const subButtons = {
   ui: document.getElementById("sub-ui"),
@@ -613,8 +659,11 @@ const optCell = document.getElementById("opt-cell");
 settings.cellPx = parseInt(optCell.value, 10) || 24;
 settings.edgeHighlight = document.getElementById("opt-edge").checked;
 settings.pressPreview = document.getElementById("opt-press").checked;
+settings.moves = document.getElementById("opt-moves").checked;
 const optView = document.getElementById("opt-view");
 settings.viewCells = parseInt(optView.value, 10) || 30;
+const optMem = document.getElementById("opt-mem");
+settings.memLimitMb = parseInt(optMem.value, 10) || 1024;
 applyViewVars();
 
 // 初始化：与服务器同步结构处理方式设置

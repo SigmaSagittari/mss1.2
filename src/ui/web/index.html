@@ -27,6 +27,7 @@
       </div>
       <div class="submenu" id="sub-ui-panel">
         <label><input type="checkbox" id="opt-prob"> 显示概率</label>
+        <label><input type="checkbox" id="opt-moves"> 招法质量（取代概率）</label>
         <label><input type="checkbox" id="opt-press" checked> 按住预览</label>
         <label><input type="checkbox" id="opt-edge" checked> 0%/100% 高亮</label>
         <label>格子大小 <input id="opt-cell" type="number" min="8" max="80" value="40"> px</label>
@@ -41,6 +42,7 @@
         </label>
         <label>随机种子 <input id="opt-seed" type="number" min="0" value="0"></label>
         <button id="seed-start" type="button">用此种子开局</button>
+        <label>搜索内存上限 <input id="opt-mem" type="number" min="64" max="32768" value="1024"> MB</label>
       </div>
     </div>
   </div>
@@ -57,7 +59,15 @@
       <div id="analyze-section" hidden>
         <div class="panel-title">全局分析</div>
         <button id="analyze-btn" type="button">开始分析</button>
-        <pre id="analyze-text">进入分析模式后自动计算，编辑后自动重算</pre>
+          <pre id="analyze-text">进入分析模式后点「开始分析」</pre>
+          <div id="analyze-tree" hidden>
+            <div class="panel-title">搜索树</div>
+            <div class="tree-toolbar">
+              <button id="tree-root" type="button">回根</button>
+              <button id="tree-refresh" type="button">刷新</button>
+            </div>
+            <div id="tree-content">（未开始分析）</div>
+          </div>
       </div>
     </div>
   </div>

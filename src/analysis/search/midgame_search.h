@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <functional>
+#include <ostream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -48,9 +50,14 @@ struct MidgameSearch {
     // 可标定参数。
     struct Config {
         int nodeBudget = 128;
-        long double s = 0.1L;      // log-生存尺度
+        long double s = 0.02L;     // log-生存尺度（越小头部越陡：ΔL=0.3 时 r 从 1/7 → 1/16）
         long double eps = 0.01L;   // 停流阈值：t_local ≤ eps → 子树出局
         long double alpha = 0.5L;  // 需求度子项阻尼指数
+        // 树内存上限（字节）：树节点只增不删，长时间运行会无限膨胀，
+        // 按内存字节封顶（候选少的盘面可跑更多节点）。
+        // 存储 double 化 + 懒 observe 后每节点约 67KB（30x16/99 盘面），
+        // 默认 1GB ≈ 1.5 万节点（约 4 层深）；想更深直接改这里。
+        long long maxMemBytes = 1024LL * 1024 * 1024;
     };
 
     // 搜索上下文：根盘面状态（只读引用）+ 池 + 抽样 Rng。
@@ -74,14 +81,21 @@ struct MidgameSearch {
         int observes = 0;        // observe 调用次数（累计）
     };
 
+    // 已展开分支的稀疏引用：一个动作的一次 digit 展开占一条。
+    // 全树只有真正展开过的分支会记录——不再为每个候选格 × 9 槽存 -1 占位。
+    struct BranchRef {
+        int ai = -1;         // actions 下标
+        int k = -1;          // digit 0..8
+        int child = kUnexp;  // 子节点 id；kDominated = 被换位表支配
+    };
+
     // 一个候选动作（盘面节点的孩子；机会节点隐含在分支转移里）。
+    // 扁平紧凑：只有 cell/概率/懒 digit 索引；分支引用见 Node::branches。
     struct Action {
         CellId cell = -1;
-        long double mult = 1.0L;               // 非前沿乘系数（只作用于分流分数）
-        long double p = 0;                     // 雷概率（observe explosion）
-        std::array<long double, 9> digit{};    // 观测分布
-        std::array<int, 9> child = {kUnexp, kUnexp, kUnexp, kUnexp, kUnexp,
-                                    kUnexp, kUnexp, kUnexp, kUnexp};  // 分支盘面节点
+        double mult = 1.0;   // 非前沿乘系数（只作用于分流分数）
+        double p = 0;        // 雷概率（直接查 analyze 结果）
+        int digitIdx = -1;   // 懒 observe：Node::readyDigits 索引；-1 = 未观察
     };
 
     // 树节点 = 一个盘面状态。
@@ -95,6 +109,9 @@ struct MidgameSearch {
         long double dacc = 0;    // 累积死亡 = 1−exp(L)
         bool expanded = false;
         std::vector<Action> actions;
+        std::vector<BranchRef> branches;                  // 本节点已展开分支（稀疏）
+        int expActions = 0;                               // 已展开过分支的招法数（探索度；首吃时 ++）
+        std::vector<std::array<double, 9>> readyDigits;   // 懒 observe 的 digit 池（Action::digitIdx 索引）
         Basic::Delta basicDelta;       // 从父到本节点的增量（物化重放用）
         Structure::Delta structureDelta;
 
@@ -111,6 +128,7 @@ struct MidgameSearch {
     // 搜索树本体。nodes[0] = 根（真实盘面，无 delta）。
     struct Tree {
         std::vector<Node> nodes;
+        std::vector<int> subtreeNodes;           // 与 nodes 对齐：该节点为根的子树节点数
         FlatHashTable<U128, int, U128Hash> seen;  // path → 节点（换位表）
         int rows = 0, cols = 0;
         int statsNodes = 0;
@@ -135,7 +153,7 @@ struct MidgameSearch {
 
     static constexpr int kUnexp = -1;      // 分支未展开（默认 (c,t)=(1,1)）
     static constexpr int kDominated = -2;  // 分支被换位表支配（价值=1，无需求）
-    static constexpr std::array<long double, 4> kBinMult = {1.0L, 1.05L, 1.1L, 1.2L};
+    static constexpr std::array<long double, 4> kBinMult = {1.0L, 1.1L, 1.3L, 1.7L};
 
     // ── 会话 ──
     // 构建会话：全量管线 + 合法性检查 + 展开根。失败返回 false（s.reason 说明）。
@@ -146,6 +164,22 @@ struct MidgameSearch {
     static void grow(Session& s, int n);
     // 任意时刻查询最优落子（在公共深度 d_min 上比较各动作价值）。
     static Answer getAnswer(const Tree& t);
+    // 只读导出搜索树（log/交互展示用），maxDepth/maxNodes 防止输出撑爆。
+    static void dumpTree(const Tree& t, std::ostream& os, int maxDepth = 5, int maxNodes = 200);
+
+    // ── 只读树查询（供 UI/诊断读树；稀疏分支/懒 digit 的统一访问口）──
+    // 动作分支状态：未展开 kUnexp；被支配 kDominated；否则子节点 id。
+    static int branchOf(const Node& n, int ai, int k) {
+        for (const BranchRef& b : n.branches)
+            if (b.ai == ai && b.k == k) return b.child;
+        return kUnexp;
+    }
+    // 动作 digit 分布指针；nullptr = 未 observe（懒模式下常见）。
+    static const std::array<double, 9>* digitOf(const Node& n, const Action& a) {
+        return (a.digitIdx >= 0 && a.digitIdx < static_cast<int>(n.readyDigits.size()))
+                   ? &n.readyDigits[static_cast<std::size_t>(a.digitIdx)]
+                   : nullptr;
+    }
 
     // ── 树操作（供会话使用）──
     // 展开根（花 1 节点）。
@@ -169,16 +203,19 @@ private:
     static int binOf(const ObservedBoard& board, const Basic::Result& basic, int x, int y);
     static void expand(Tree& t, Node& n, const Materialized& m, const Ctx& ctx);
     static Materialized materialize(const Tree& t, int nodeId, const Ctx& ctx);
-    static int expandChild(Tree& t, int parentId, int ai, int k, const Ctx& ctx);
+    // 懒观察：确保动作 digit 分布已算（首次展开分支时才 observe，结果缓存于 readyDigits）。
+    static void ensureObserve(Tree& t, int nodeId, int ai, const Materialized& m, const Ctx& ctx);
+    // 展开指定分支（k）生成子节点；父状态已在 m 中物化。
+    static int expandChild(Tree& t, int parentId, int ai, int k, Materialized& m, const Ctx& ctx);
+    // 展开该动作下一个未展开分支（digit 降序）：物化 → 懒 observe → 选分支 → 展开。
+    static int expandNextBranch(Tree& t, int parentId, int ai, const Ctx& ctx);
     // 增量刷新单个节点的求值（读子节点已存的值）。
     static void refreshNode(Tree& t, int nodeId, const Config& cfg);
 
     // ── 查询 ──
-    static long double valueAtDepth(const Tree& t, int nodeId, int d);
-    static long double actionValueAtDepth(const Tree& t, const Node& n, const Action& a, int d);
-    static int subtreeMax(const Tree& t, int nodeId);
-    static int actionReach(const Tree& t, const Node& n, const Action& a);
     static int sampleByWeight(const long double* w, int n, long double wSum, Rng& rng);
+    // 该招法首次有分支记录时计入探索度（expActions++）。
+    static void markFirstExp(Node& n, int ai);
 };
 
 // ── 实现区 ──
@@ -221,43 +258,31 @@ inline void MidgameSearch::candidates(const ObservedBoard& board, const Basic::R
     using Mark = Basic::Mark;
     out.clear();
     const int rows = board.rows, cols = board.cols;
-    bool seenBin[4] = {false, false, false, false};
-    CellId rep[4] = {-1, -1, -1, -1};
+    // 所有未翻开且非已定雷的格都作为候选，不取代表。
+    // 非前沿格保留 kBinMult debuff；前沿/安全格 mult=1，语义统一。
     for (int i = 1; i <= rows; ++i)
         for (int j = 1; j <= cols; ++j) {
             if (board.board[i][j] != Cell::Hidden) continue;
             if (basic.marks[i][j] == Mark::Mine) continue;
-            if (basic.marks[i][j] == Mark::Frontier ||
-                basic.marks[i][j] == Mark::Safe) {
-                Action a;
-                a.cell = board.id(i, j);
-                out.push_back(a);
-            } else {  // Unknown：按 8 连通 Unknown 数分档，每档取代表
-                const int bin = binOf(board, basic, i, j);
-                if (!seenBin[bin]) {
-                    seenBin[bin] = true;
-                    rep[bin] = board.id(i, j);
-                }
-            }
-        }
-    for (int bin = 0; bin < 4; ++bin)
-        if (seenBin[bin]) {
             Action a;
-            a.cell = rep[bin];
-            a.mult = kBinMult[static_cast<std::size_t>(bin)];
+            a.cell = board.id(i, j);
+            if (basic.marks[i][j] == Mark::Frontier || basic.marks[i][j] == Mark::Safe) {
+                a.mult = 1.0;
+            } else {
+                a.mult = static_cast<double>(kBinMult[static_cast<std::size_t>(
+                    binOf(board, basic, i, j))]);
+            }
             out.push_back(a);
         }
 }
-
 inline void MidgameSearch::expand(Tree& t, Node& n, const Materialized& m, const Ctx& ctx) {
     n.expanded = true;
     candidates(m.board, m.basic, n.actions);
     for (Action& a : n.actions) {
-        const Probability::ObserveResult obr =
-            Exact::observe(m.board, m.basic, m.structure, m.prob, ctx.pool, a.cell);
-        ++t.statsObserves;
-        a.p = obr.explosion;
-        a.digit = obr.digit;
+        // 爆炸概率直接查 analyze 结果（O(1)），不调 observe。
+        // digit 分布懒计算：只有该动作首次被选中展开分支时才 observe（见 ensureObserve）。
+        a.p = static_cast<double>(
+            m.prob.mineProbability(a.cell, m.board, m.basic, m.structure));
     }
 }
 
@@ -282,7 +307,23 @@ inline MidgameSearch::Materialized MidgameSearch::materialize(const Tree& t, int
     return m;
 }
 
-inline int MidgameSearch::expandChild(Tree& t, int parentId, int ai, int k, const Ctx& ctx) {
+inline void MidgameSearch::ensureObserve(Tree& t, int nodeId, int ai, const Materialized& m,
+                                         const Ctx& ctx) {
+    Node& n = t.nodes[static_cast<std::size_t>(nodeId)];
+    Action& a = n.actions[static_cast<std::size_t>(ai)];
+    if (a.digitIdx >= 0) return;
+    const Probability::ObserveResult obr =
+        Exact::observe(m.board, m.basic, m.structure, m.prob, ctx.pool, a.cell);
+    ++t.statsObserves;
+    std::array<double, 9> d{};
+    for (int k = 0; k <= 8; ++k)
+        d[static_cast<std::size_t>(k)] = static_cast<double>(obr.digit[static_cast<std::size_t>(k)]);
+    a.digitIdx = static_cast<int>(n.readyDigits.size());
+    n.readyDigits.push_back(d);
+}
+
+inline int MidgameSearch::expandChild(Tree& t, int parentId, int ai, int k, Materialized& m,
+                                      const Ctx& ctx) {
     Node& parent = t.nodes[static_cast<std::size_t>(parentId)];
     Action& a = parent.actions[static_cast<std::size_t>(ai)];
 
@@ -293,13 +334,13 @@ inline int MidgameSearch::expandChild(Tree& t, int parentId, int ai, int k, cons
     if (const int* found = t.seen.find(path)) {
         const Node& exist = t.nodes[static_cast<std::size_t>(*found)];
         if (exist.dacc <= childDacc + 1e-15L) {
-            a.child[static_cast<std::size_t>(k)] = kDominated;
+            markFirstExp(parent, ai);  // 该招法被尝试过（即使支配）也计入探索度
+            parent.branches.push_back(BranchRef{ai, k, kDominated});
             return -2;
         }
     }
 
-    // 物化父状态 → 应用翻开 → 增量维护 → 重算概率。
-    Materialized m = materialize(t, parentId, ctx);
+    // m 已由调用方物化（父状态）→ 应用翻开 → 增量维护 → 重算概率。
     const auto [x, y] = m.board.pos(a.cell);
     m.board.board[x][y] = static_cast<Cell>(k);
     std::vector<Basic::Update> updates;
@@ -315,7 +356,8 @@ inline int MidgameSearch::expandChild(Tree& t, int parentId, int ai, int k, cons
     child.digit = k;
     child.path = path;
     child.depth = parent.depth + 1;
-    child.L = parent.L + std::log(std::max(1e-15L, 1.0L - std::min(1.0L - 1e-15L, a.p)));
+    child.L = parent.L + std::log(std::max(1e-15L, 1.0L - std::min(1.0L - 1e-15L,
+                                                                     static_cast<long double>(a.p))));
     child.dacc = childDacc;
     child.basicDelta = std::move(bd);
     child.structureDelta = std::move(sd);
@@ -323,19 +365,45 @@ inline int MidgameSearch::expandChild(Tree& t, int parentId, int ai, int k, cons
     const int childId = static_cast<int>(t.nodes.size());
     expand(t, child, m, ctx);
     t.nodes.push_back(std::move(child));
+    t.subtreeNodes.push_back(1);
     t.seen[path] = childId;
     ++t.statsNodes;
-    // 写回父分支（push_back 后引用失效，重新取）。
-    t.nodes[static_cast<std::size_t>(parentId)]
-        .actions[static_cast<std::size_t>(ai)]
-        .child[static_cast<std::size_t>(k)] = childId;
+    for (int id = parentId; id >= 0; id = t.nodes[static_cast<std::size_t>(id)].parent)
+        ++t.subtreeNodes[static_cast<std::size_t>(id)];
+    // 写回父分支（push_back 后 Node 引用失效，重新取）。
+    Node& parent2 = t.nodes[static_cast<std::size_t>(parentId)];
+    markFirstExp(parent2, ai);
+    parent2.branches.push_back(BranchRef{ai, k, childId});
     // 增量刷新：新节点 → 根。
     for (int id = childId; id >= 0; id = t.nodes[static_cast<std::size_t>(id)].parent)
         refreshNode(t, id, ctx.config);
     return childId;
 }
 
+inline int MidgameSearch::expandNextBranch(Tree& t, int parentId, int ai, const Ctx& ctx) {
+    // 物化父状态一次 → 懒 observe 该动作的 digit 分布 → 选 digit 最大的未展开分支展开。
+    Materialized m = materialize(t, parentId, ctx);
+    Node& parent = t.nodes[static_cast<std::size_t>(parentId)];
+    ensureObserve(t, parentId, ai, m, ctx);
+    const Action& a = parent.actions[static_cast<std::size_t>(ai)];
+    const std::array<double, 9>& d = parent.readyDigits[static_cast<std::size_t>(a.digitIdx)];
+    int kExpand = -1;
+    long double bestD = -1.0L;
+    for (int k = 0; k <= 8; ++k) {
+        if (d[static_cast<std::size_t>(k)] <= 0.0) continue;
+        if (branchOf(parent, ai, k) == kUnexp && static_cast<long double>(d[static_cast<std::size_t>(k)]) > bestD) {
+            bestD = d[static_cast<std::size_t>(k)];
+            kExpand = k;
+        }
+    }
+    if (kExpand < 0) return -2;  // 无可展开分支（防御；调用方重试其他动作）
+    return expandChild(t, parentId, ai, kExpand, m, ctx);
+}
+
 // 求值：读子节点已存的值，只重算本节点。子变化时必须自底向上沿路径调用。
+    // 注意：本函数的所有"动作侧概率"用视同概率 p' = p × mult——非前沿格 mult
+    // 是"视同概率乘以"（20%×1.2→24%），只在节点分配（r/竞争/score）生效；
+    // 评估/展示侧（getAnswer、质量标注）仍用真实 p。
 inline void MidgameSearch::refreshNode(Tree& t, int nodeId, const Config& cfg) {
     Node& n = t.nodes[static_cast<std::size_t>(nodeId)];
     if (!n.expanded) return;
@@ -344,21 +412,27 @@ inline void MidgameSearch::refreshNode(Tree& t, int nodeId, const Config& cfg) {
     n.score.assign(na, 0.0L);
     if (na == 0) return;
 
-    // 动作当前价值（子节点存 value；未展开 = 叶子值；被支配 = 100% 死）。
-    auto childValue = [&](const Action& a, int k) -> long double {
-        const int c = a.child[static_cast<std::size_t>(k)];
+    // 动作视同概率（分配侧）：p' = p × mult。
+    auto pEff = [&](int ai) -> long double {
+        const Action& a = n.actions[static_cast<std::size_t>(ai)];
+        return static_cast<long double>(a.p) * static_cast<long double>(a.mult);
+    };
+    // 动作当前价值（子节点存 value；未展开 = 叶子值（用视同概率）；被支配 = 100% 死）。
+    auto childValue = [&](int ai, int k) -> long double {
+        const int c = branchOf(n, ai, k);
         if (c == kDominated) return 1.0L;
-        if (c == kUnexp) return 1.0L - (1.0L - n.dacc) * (1.0L - a.p);
+        if (c == kUnexp)
+            return 1.0L - (1.0L - n.dacc) * (1.0L - pEff(ai));
         return t.nodes[static_cast<std::size_t>(c)].value;
     };
-    auto childT = [&](const Action& a, int k) -> long double {
-        const int c = a.child[static_cast<std::size_t>(k)];
+    auto childT = [&](int ai, int k) -> long double {
+        const int c = branchOf(n, ai, k);
         if (c == kDominated) return 0.0L;
         if (c == kUnexp) return 1.0L;
         return t.nodes[static_cast<std::size_t>(c)].t;
     };
-    auto childC = [&](const Action& a, int k) -> long double {
-        const int c = a.child[static_cast<std::size_t>(k)];
+    auto childC = [&](int ai, int k) -> long double {
+        const int c = branchOf(n, ai, k);
         if (c == kDominated) return 0.0L;
         if (c == kUnexp) return 1.0L;
         return t.nodes[static_cast<std::size_t>(c)].C;
@@ -368,14 +442,26 @@ inline void MidgameSearch::refreshNode(Tree& t, int nodeId, const Config& cfg) {
     std::vector<long double> tO(na, 0.0L);
     std::vector<long double> cO(na, 0.0L);
     long double v1 = 1e30L, v2 = 1e30L;
+    bool hasSafe = false;
     for (std::size_t i = 0; i < na; ++i) {
         const Action& a = n.actions[i];
-        long double av = a.p;   // 爆炸分支贡献 p×1
-        for (int k = 0; k <= 8; ++k) {
-            if (a.digit[static_cast<std::size_t>(k)] <= 0.0L) continue;
-            av += a.digit[static_cast<std::size_t>(k)] * childValue(a, k);
-            tO[i] += a.digit[static_cast<std::size_t>(k)] * childT(a, k);
-            cO[i] += a.digit[static_cast<std::size_t>(k)] * childC(a, k);
+        const long double pe = pEff(static_cast<int>(i));
+        long double av = pe;   // 爆炸分支贡献 p'×1（视同概率）
+        const std::array<double, 9>* d = digitOf(n, a);
+        if (!d) {
+            // digit 未 observe（该动作从未展开过分支）：所有分支都是叶子值 L，
+            // Σdigit = 1-p' 聚合——不需要单个 digit 概率。
+            const long double L = 1.0L - (1.0L - n.dacc) * (1.0L - pe);
+            av += (1.0L - pe) * L;
+            tO[i] = 1.0L - pe;
+            cO[i] = 1.0L - pe;
+        } else {
+            for (int k = 0; k <= 8; ++k) {
+                if ((*d)[static_cast<std::size_t>(k)] <= 0.0) continue;
+                av += (*d)[static_cast<std::size_t>(k)] * childValue(static_cast<int>(i), k);
+                tO[i] += (*d)[static_cast<std::size_t>(k)] * childT(static_cast<int>(i), k);
+                cO[i] += (*d)[static_cast<std::size_t>(k)] * childC(static_cast<int>(i), k);
+            }
         }
         v[i] = av;
         if (av < v1) {
@@ -384,30 +470,61 @@ inline void MidgameSearch::refreshNode(Tree& t, int nodeId, const Config& cfg) {
         } else if (av < v2) {
             v2 = av;
         }
+        if (a.p <= 0.0L) hasSafe = true;
     }
     n.value = v1;
 
+    // 必安格（p=0）在当前招法选择上绝对优先：
+    // 只要存在必安格，分配只看这些必安格，风险格不参与这层抢资源。
+    long double vBest = v1;
+    long double vSecond = v2;
+    int activeCount = static_cast<int>(na);
+    if (hasSafe) {
+        vBest = 1e30L;
+        vSecond = 1e30L;
+        activeCount = 0;
+        for (std::size_t i = 0; i < na; ++i) {
+            if (n.actions[i].p > 0.0L) continue;
+            ++activeCount;
+            const long double av = v[i];
+            if (av < vBest) {
+                vSecond = vBest;
+                vBest = av;
+            } else if (av < vSecond) {
+                vSecond = av;
+            }
+        }
+        n.value = vBest;
+    }
+
     // ΔL（log-生存空间）；v→1 时 log(0) 守卫。
     const long double safe = 1e-15L;
-    const long double logV1 = std::log(std::max(safe, 1.0L - std::min(1.0L - safe, v1)));
+    const long double logV1 = std::log(std::max(safe, 1.0L - std::min(1.0L - safe, vBest)));
+    long double rSum = 0;
     for (std::size_t i = 0; i < na; ++i) {
+        const bool active = !hasSafe || n.actions[i].p <= 0.0L;
+        if (!active) continue;
         const long double lv = std::log(std::max(safe, 1.0L - std::min(1.0L - safe, v[i])));
         n.r[i] = 1.0L / (1.0L + std::max(0.0L, logV1 - lv) / cfg.s);
+        rSum += n.r[i];
     }
-    long double rSum = 0;
-    for (std::size_t i = 0; i < na; ++i) rSum += n.r[i];
     if (rSum > 0) {
         for (std::size_t i = 0; i < na; ++i) n.r[i] /= rSum;
+    } else if (activeCount > 0) {
+        const long double denom = static_cast<long double>(activeCount);
+        for (std::size_t i = 0; i < na; ++i)
+            if ((!hasSafe || n.actions[i].p <= 0.0L)) n.r[i] = 1.0L / denom;
     } else {
         for (std::size_t i = 0; i < na; ++i) n.r[i] = 1.0L / static_cast<long double>(na);
     }
 
-    // t_local：最优 vs 次优的 log-生存差。
-    if (na >= 2) {
-        const long double logV2 = std::log(std::max(safe, 1.0L - std::min(1.0L - safe, v2)));
+    // t_local：最优 vs 次优的 log-生存差；只有一个可分配动作时没有本层竞争。
+    // 注意：t/C 是乘性链（t = tLocal × Σr·tO 逐层累积），探索类因子若 >1 会指数爆炸
+    // （实测 score 到 1e244）。"只搜了一个招法"的探索需求不能直接乘 tLocal，需另议。
+    n.tLocal = 1.0L;
+    if (activeCount >= 2) {
+        const long double logV2 = std::log(std::max(safe, 1.0L - std::min(1.0L - safe, vSecond)));
         n.tLocal = 1.0L / (1.0L + std::max(0.0L, logV1 - logV2) / cfg.s);
-    } else {
-        n.tLocal = 1.0L;
     }
 
     // t / C / 决策转移分数。
@@ -421,57 +538,42 @@ inline void MidgameSearch::refreshNode(Tree& t, int nodeId, const Config& cfg) {
     n.scoreSum = 0;
     if (n.tLocal > cfg.eps) {
         for (std::size_t i = 0; i < na; ++i) {
-            n.score[i] = n.r[i] * cO[i] * tO[i] / n.actions[i].mult;
+            if (n.r[i] <= 0.0L) continue;
+            // 探索项：该动作子分支局面的未探索度加权（∈[0, 1-p]），乘进 score。
+            // score 每层独立（不沿深度累积），探索因子不会像 t/C 那样指数爆炸。
+            // 未展开分支 = 完全未知（未探索度 1）；已展开分支 = 子节点已探索比例余量；
+            // 被支配分支 = 已判定无需再探（0）。只被搜了一个招法的局面，其父动作
+            // 探索项接近最大 → 持续吸引预算，盘面不被"无争议"饿死。
+            long double unexp = 0.0L;
+            const std::array<double, 9>* d = digitOf(n, n.actions[i]);
+            if (!d) {
+                unexp = 1.0L - static_cast<long double>(n.actions[i].p);  // 全未观察：全部未知
+            } else {
+                for (int k = 0; k <= 8; ++k) {
+                    const double dk = (*d)[static_cast<std::size_t>(k)];
+                    if (dk <= 0.0) continue;
+                    const int c = branchOf(n, static_cast<int>(i), k);
+                    if (c == kUnexp) {
+                        unexp += dk;
+                    } else if (c >= 0) {
+                        const Node& cn = t.nodes[static_cast<std::size_t>(c)];
+                        const long double frac =
+                            cn.actions.empty()
+                                ? 1.0L
+                                : static_cast<long double>(cn.expActions) /
+                                      static_cast<long double>(cn.actions.size());
+                        unexp += dk * (1.0L - frac);
+                    }
+                    // kDominated：已判定，探索度 0。
+                }
+            }
+            const long double explore = 1.0L + unexp;
+            // 视同概率（mult）已通过 p' 进入 v→r 竞争；score 不再重复除 mult。
+            n.score[i] = n.r[i] * cO[i] * tO[i] * explore;
             n.scoreSum += n.score[i];
         }
     }
 }
-
-inline long double MidgameSearch::actionValueAtDepth(const Tree& t, const Node& n,
-                                                     const Action& a, int d) {
-    long double v = a.p;   // 爆炸分支贡献 p×1
-    for (int k = 0; k <= 8; ++k) {
-        if (a.digit[static_cast<std::size_t>(k)] <= 0.0L) continue;
-        long double childV;
-        const int c = a.child[static_cast<std::size_t>(k)];
-        if (c == kDominated)
-            childV = 1.0L;  // 被支配路径 = 100% 死
-        else if (c == kUnexp)
-            childV = 1.0L - (1.0L - n.dacc) * (1.0L - a.p);  // 未展开：叶子值
-        else
-            childV = valueAtDepth(t, c, d);
-        v += a.digit[static_cast<std::size_t>(k)] * childV;
-    }
-    return v;
-}
-
-inline long double MidgameSearch::valueAtDepth(const Tree& t, int nodeId, int d) {
-    const Node& n = t.nodes[static_cast<std::size_t>(nodeId)];
-    if (n.depth >= d || !n.expanded) return n.dacc;
-    long double best = 1e30L;
-    for (const Action& a : n.actions)
-        best = std::min(best, actionValueAtDepth(t, n, a, d));
-    return best;
-}
-
-inline int MidgameSearch::subtreeMax(const Tree& t, int nodeId) {
-    const Node& n = t.nodes[static_cast<std::size_t>(nodeId)];
-    int m = n.depth;
-    for (const Action& a : n.actions)
-        for (int k = 0; k <= 8; ++k)
-            if (a.child[static_cast<std::size_t>(k)] >= 0)
-                m = std::max(m, subtreeMax(t, a.child[static_cast<std::size_t>(k)]));
-    return m;
-}
-
-inline int MidgameSearch::actionReach(const Tree& t, const Node& n, const Action& a) {
-    int m = n.depth;
-    for (int k = 0; k <= 8; ++k)
-        if (a.child[static_cast<std::size_t>(k)] >= 0)
-            m = std::max(m, subtreeMax(t, a.child[static_cast<std::size_t>(k)]));
-    return m;
-}
-
 inline int MidgameSearch::sampleByWeight(const long double* w, int n, long double wSum,
                                          Rng& rng) {
     if (n <= 0 || wSum <= 0) return -1;
@@ -484,45 +586,78 @@ inline int MidgameSearch::sampleByWeight(const long double* w, int n, long doubl
     return n - 1;
 }
 
+inline void MidgameSearch::markFirstExp(Node& n, int ai) {
+    for (const BranchRef& b : n.branches)
+        if (b.ai == ai) return;
+    ++n.expActions;
+}
+
 inline int MidgameSearch::applyNode(Tree& t, int entry, const Ctx& ctx) {
     if (t.nodes.empty() || !t.nodes[0].expanded) return -1;
     const Config& cfg = ctx.config;
+    // 内存上限：树内存 ≈ 节点数 × 每节点估计（候选数 × 每动作 64B + 固定 ~1.2KB）。
+    // 每动作 64B = Action 32B（cell/mult/p/digitIdx）+ r/score 各 16B；
+    // 稀疏分支/懒 digit 占树总量比例极低，已含在固定项。
+    // 实测（30x16/99，476 候选）：每节点 31.7KB = 476×64+1200 ≈ 31.7KB ✓。
+    // 超限即停流（返回 -1，调用方 grow 会停止，后台线程随之退出）。
+    if (!t.nodes.empty()) {
+        const long double perNode =
+            static_cast<long double>(t.nodes[0].actions.size()) * 64.0L + 1200.0L;
+        if (static_cast<long double>(t.statsNodes) * perNode >=
+            static_cast<long double>(cfg.maxMemBytes))
+            return -1;
+    }
     for (int attempt = 0; attempt < 64; ++attempt) {
         int cur = entry;
         int res = -1;
         for (;;) {
             const Node& n = t.nodes[static_cast<std::size_t>(cur)];
             if (n.scoreSum <= 0) return -1;  // 停流
+            // ── 决策转移（局面→招法）：纯 score 分配，不做填满 ──
+            // 局面→招法由 score（含不稳定度与概率）自然分配：垃圾动作 score 低，
+            // 自然被饿死——不需要特判/保底。填满发生在"招法→局面"层（见观测转移）。
             const int ai = sampleByWeight(n.score.data(), static_cast<int>(n.score.size()),
                                           n.scoreSum, ctx.rng);
             if (ai < 0) return -1;
+            // ── 观测转移（招法→局面）：这是"填满"发生的地方 ──
+            // 选中的招法只要还有未展开的 digit 分支局面（含未 observe 的首吃），
+            // 就展开一个（digit 降序，保证大数字也被评估、拿到完整基本数值）；
+            // 该招法的局面层全部填满后，才允许按权重 digit × C(子) × t(子) 下潜深搜。
             const Action& a = n.actions[static_cast<std::size_t>(ai)];
-            // 观测转移：分支权重 = digit × C(子) × t(子)。
+            {
+                const std::array<double, 9>* d = digitOf(n, a);
+                bool hasUnexp = !d;  // 未 observe：必存在可展开分支（Σdigit = 1-p > 0）
+                if (d) {
+                    for (int k = 0; k <= 8; ++k)
+                        if ((*d)[static_cast<std::size_t>(k)] > 0.0 &&
+                            branchOf(n, ai, k) == kUnexp) {
+                            hasUnexp = true;
+                            break;
+                        }
+                }
+                if (hasUnexp) {
+                    res = expandNextBranch(t, cur, ai, ctx);
+                    break;
+                }
+            }
             std::array<long double, 9> bw{};
             long double bwSum = 0;
             for (int k = 0; k <= 8; ++k) {
-                if (a.digit[static_cast<std::size_t>(k)] <= 0) continue;
-                const int c = a.child[static_cast<std::size_t>(k)];
-                long double ct = (c == kDominated)
-                                     ? 0.0L
-                                     : (c == kUnexp) ? 1.0L
-                                                     : t.nodes[static_cast<std::size_t>(c)].t;
-                long double cc = (c == kDominated)
-                                     ? 0.0L
-                                     : (c == kUnexp) ? 1.0L
-                                                     : t.nodes[static_cast<std::size_t>(c)].C;
+                const double dk = n.readyDigits[static_cast<std::size_t>(a.digitIdx)]
+                                     [static_cast<std::size_t>(k)];
+                if (dk <= 0) continue;
+                const int c = branchOf(n, ai, k);
+                if (c == kDominated) continue;
+                const long double ct = t.nodes[static_cast<std::size_t>(c)].t;
+                const long double cc = t.nodes[static_cast<std::size_t>(c)].C;
                 if (ct <= 0 || cc <= 0) continue;
-                bw[static_cast<std::size_t>(k)] = a.digit[static_cast<std::size_t>(k)] * ct * cc;
+                bw[static_cast<std::size_t>(k)] = dk * ct * cc;
                 bwSum += bw[static_cast<std::size_t>(k)];
             }
             const int k = sampleByWeight(bw.data(), 9, bwSum, ctx.rng);
             if (k < 0) return -1;
-            if (a.child[static_cast<std::size_t>(k)] >= 0) {
-                cur = a.child[static_cast<std::size_t>(k)];  // 下潜到已展开子树
-                continue;
-            }
-            res = expandChild(t, cur, ai, k, ctx);  // 未展开分支：创建并展开
-            break;
+            cur = branchOf(n, ai, k);  // 下潜到已展开子树
+            continue;
         }
         if (res == -2) continue;  // 支配分支：重试
         return res;
@@ -537,6 +672,7 @@ inline void MidgameSearch::init(Tree& t, const Ctx& ctx) {
     t.cols = ctx.board.cols;
     t.statsNodes = 0;
     t.statsObserves = 0;
+    t.subtreeNodes.clear();
     Node root;
     root.depth = 0;
     root.L = 0;
@@ -548,6 +684,7 @@ inline void MidgameSearch::init(Tree& t, const Ctx& ctx) {
     m.prob = ctx.prob;
     expand(t, root, m, ctx);
     t.nodes.push_back(std::move(root));
+    t.subtreeNodes.push_back(1);
     ++t.statsNodes;
     refreshNode(t, 0, ctx.config);
 }
@@ -557,15 +694,33 @@ inline MidgameSearch::Answer MidgameSearch::getAnswer(const Tree& t) {
     if (t.nodes.empty() || !t.nodes[0].expanded) return ans;
     const Node& root = t.nodes[0];
     if (root.actions.empty()) return ans;
-    // 公共比较深度：各动作可达深度的最小值。
-    int dMin = 1000000000;
-    for (const Action& a : root.actions) dMin = std::min(dMin, actionReach(t, root, a));
-    if (dMin == 1000000000) dMin = 0;
-    ans.depth = dMin;
+    // 优劣度 = 动作价值（当前树混合价值：已展开分支用子节点真实 value，
+    // 未展开分支用叶子近似），最小者最优。不用公共深度截断——截断在浅树下
+    // 会退化成纯 p 函数、抹掉全部搜索信息；也不把分配分数 score 当优劣度。
     long double best = 1e30L;
-    for (const Action& a : root.actions) {
-        const long double v = actionValueAtDepth(t, root, a, dMin);
-        if (v < best) {
+    for (std::size_t i = 0; i < root.actions.size(); ++i) {
+        const Action& a = root.actions[i];
+        long double v = a.p;   // 爆炸分支贡献 p×1
+        const std::array<double, 9>* d = digitOf(root, a);
+        if (!d) {
+            // 聚合：所有分支未展开，价值只依赖 p（Σdigit = 1-p）。
+            const long double L = 1.0L - (1.0L - root.dacc) * (1.0L - a.p);
+            v = a.p + (1.0L - a.p) * L;
+        } else {
+            for (int k = 0; k <= 8; ++k) {
+                if ((*d)[static_cast<std::size_t>(k)] <= 0.0) continue;
+                long double childV;
+                const int c = branchOf(root, static_cast<int>(i), k);
+                if (c == kDominated)
+                    childV = 1.0L;
+                else if (c == kUnexp)
+                    childV = 1.0L - (1.0L - root.dacc) * (1.0L - a.p);
+                else
+                    childV = t.nodes[static_cast<std::size_t>(c)].value;
+                v += (*d)[static_cast<std::size_t>(k)] * childV;
+            }
+        }
+        if (v < best - 1e-15L) {
             best = v;
             const auto [x, y] = std::pair<int, int>{a.cell / (t.cols + 1), a.cell % (t.cols + 1)};
             ans.x = x;
@@ -635,6 +790,64 @@ inline void MidgameSearch::grow(Session& s, int n) {
     Ctx ctx{s.board, s.basic, s.structure, s.prob, s.shapes, s.pool, s.rng, s.config};
     for (int i = 0; i < n; ++i)
         if (applyNode(s.tree, 0, ctx) < 0) break;
+}
+
+inline void MidgameSearch::dumpTree(const Tree& t, std::ostream& os, int maxDepth, int maxNodes) {
+    os << "search tree nodes=" << t.statsNodes << " observes=" << t.statsObserves << "\n";
+    int printed = 0;
+    std::function<void(int, int)> rec = [&](int id, int depth) {
+        if (printed >= maxNodes || depth > maxDepth) return;
+        const Node& n = t.nodes[static_cast<std::size_t>(id)];
+        ++printed;
+        for (int i = 0; i < depth; ++i) os << "  ";
+        os << "#" << id << " depth=" << n.depth;
+        if (n.cell >= 0) {
+            const int x = n.cell / (t.cols + 1);
+            const int y = n.cell % (t.cols + 1);
+            os << " cell=(" << x << "," << y << ")";
+            if (n.digit >= 0) os << " digit=" << n.digit;
+        }
+        os << " value=" << static_cast<double>(n.value)
+           << " tLocal=" << static_cast<double>(n.tLocal)
+           << " t=" << static_cast<double>(n.t)
+           << " C=" << static_cast<double>(n.C)
+           << " actions=" << n.actions.size() << "\n";
+        if (printed >= maxNodes || depth >= maxDepth) return;
+        for (std::size_t i = 0; i < n.actions.size(); ++i) {
+            if (printed >= maxNodes) break;
+            const Action& a = n.actions[i];
+            for (int d = 0; d < depth + 1; ++d) os << "  ";
+            const int x = a.cell / (t.cols + 1);
+            const int y = a.cell % (t.cols + 1);
+            os << "move (" << x << "," << y << ") p=" << static_cast<double>(a.p)
+               << " r=" << (i < n.r.size() ? static_cast<double>(n.r[i]) : 0.0)
+               << " score=" << (i < n.score.size() ? static_cast<double>(n.score[i]) : 0.0)
+               << "\n";
+            const std::array<double, 9>* dg = digitOf(n, a);
+            if (!dg) continue;  // 懒 observe：未观察的动作没有分支明细
+            for (int k = 0; k <= 8; ++k) {
+                if ((*dg)[static_cast<std::size_t>(k)] <= 0.0L) continue;
+                if (printed >= maxNodes) break;
+                const int c = branchOf(n, static_cast<int>(i), k);
+                for (int d = 0; d < depth + 2; ++d) os << "  ";
+                os << "digit " << k << " prob=" << static_cast<double>((*dg)[static_cast<std::size_t>(k)])
+                   << " -> ";
+                if (c == kDominated) {
+                    os << "dominated\n";
+                } else if (c == kUnexp) {
+                    os << "unexpanded\n";
+                } else if (c >= 0 && c < static_cast<int>(t.nodes.size())) {
+                    const Node& cn = t.nodes[static_cast<std::size_t>(c)];
+                    os << "#" << c << " value=" << static_cast<double>(cn.value)
+                       << " t=" << static_cast<double>(cn.t)
+                       << " C=" << static_cast<double>(cn.C) << "\n";
+                    rec(c, depth + 1);
+                }
+            }
+        }
+    };
+    rec(0, 0);
+    if (printed >= maxNodes) os << "... truncated (maxNodes=" << maxNodes << ") ...\n";
 }
 
 }  // namespace mss
